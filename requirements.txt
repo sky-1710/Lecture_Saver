@@ -1,0 +1,33 @@
+# Lecture Saver - runtime dependencies (Phase 1-2)
+#
+# Everything here runs locally. No dependency in this file talks to a cloud
+# transcription or vision service. The only network access the application ever
+# performs is the ONE-TIME download of Whisper model weights from Hugging Face
+# (via huggingface_hub, pulled in by faster-whisper). After that download the
+# application works fully offline.
+
+# --- Desktop UI -------------------------------------------------------------
+# Essentials = QtCore/QtGui/QtWidgets. Addons is required as well because
+# QtMultimedia + QtMultimediaWidgets moved into the Addons wheel in Qt 6.9.
+# Qt's bundled FFmpeg media backend is what lets MP4/MOV/MKV play without the
+# user installing any system codec pack.
+PySide6-Essentials>=6.8,<6.10
+PySide6-Addons>=6.8,<6.10
+
+# --- Local speech-to-text ---------------------------------------------------
+# CTranslate2 re-implementation of Whisper. Roughly 4x faster than
+# openai-whisper on CPU with int8 quantisation, which matters a great deal on a
+# machine with no CUDA GPU.
+faster-whisper>=1.1.0
+
+# --- Slide detection --------------------------------------------------------
+# All frame comparison (perceptual hashing, per-cell SSIM, grid change maps) is
+# plain NumPy. OpenCV is deliberately not used: FFmpeg already does the
+# decoding, scaling and grayscale conversion, so OpenCV would add ~90 MB of
+# wheel for operations that are a handful of array expressions.
+numpy>=1.24
+
+# --- FFmpeg binary ----------------------------------------------------------
+# Ships a static ffmpeg.exe inside the wheel so FFmpeg does not have to be
+# installed by hand. A system-wide ffmpeg/ffprobe is preferred when present.
+imageio-ffmpeg>=0.5.1

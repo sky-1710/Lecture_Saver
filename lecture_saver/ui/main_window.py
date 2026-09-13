@@ -1,0 +1,707 @@
+"""Main window: project lifecycle, menus, and orchestration of workers."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from pathlib import Path
+
+from PySide6.QtCore import QThread, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QInputDialog,
+    QMainWindow,
+    QMessageBox,
+    QStackedWidget,
+)
+
+from ..config import Settings, log_file
+from ..core.models import VideoInfo
+from ..core.project import Project, ProjectError, is_project_dir
+from ..core.slides import (
+    SlideDetectionOptions,
+    SlideEditError,
+    SlideSet,
+    delete_appearance,
+    merge_with_previous,
+    move_boundary,
+    set_slide_image,
+    split_at,
+)
+from ..core.timecode import format_hms
+from ..media.errors import FFmpegNotFoundError, MediaError
+from ..media.ffmpeg_tools import VIDEO_FILE_FILTER, find_ffmpeg, find_ffprobe
+from ..slides.pipeline import capture_slide_image
+from ..transcription.whisper_engine import WhisperOptions
+from .lecture_view import LectureView
+from .start_view import StartView
+from .workers import ProbeWorker, SlideDetectionWorker, TranscriptionWorker, run_in_thread
+
+log = logging.getLogger(__name__)
+
+__all__ = ["MainWindow"]
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, settings: Settings) -> None:
+        super().__init__()
+        self.settings = settings
+        self.project: Project | None = None
+
+        self._probe_thread: QThread | None = None
+        self._probe_worker: ProbeWorker | None = None
+        self._transcribe_thread: QThread | None = None
+        self._transcribe_worker: TranscriptionWorker | None = None
+        self._slides_thread: QThread | None = None
+        self._slides_worker: SlideDetectionWorker | None = None
+
+        self.setWindowTitle("Lecture Saver")
+        self.setMinimumSize(820, 560)
+        self.resize(1280, 800)
+
+        self._stack = QStackedWidget()
+        self._start_view = StartView()
+        self._lecture_view = LectureView()
+        self._stack.addWidget(self._start_view)
+        self._stack.addWidget(self._lecture_view)
+        self.setCentralWidget(self._stack)
+
+        self._build_menus()
+        self._connect()
+        self._restore_geometry()
+        self._refresh_recent()
+        self.statusBar().showMessage("Ready")
+
+    # -- construction -------------------------------------------------------
+
+    def _build_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+
+        self._new_action = QAction("&New project from video...", self)
+        self._new_action.setShortcut(QKeySequence.StandardKey.New)
+        file_menu.addAction(self._new_action)
+
+        self._open_action = QAction("&Open project...", self)
+        self._open_action.setShortcut(QKeySequence.StandardKey.Open)
+        file_menu.addAction(self._open_action)
+
+        self._recent_menu = file_menu.addMenu("Open &recent")
+        file_menu.addSeparator()
+
+        self._close_action = QAction("&Close project", self)
+        self._close_action.setEnabled(False)
+        file_menu.addAction(self._close_action)
+
+        self._reveal_action = QAction("Show project &folder", self)
+        self._reveal_action.setEnabled(False)
+        file_menu.addAction(self._reveal_action)
+
+        file_menu.addSeparator()
+        quit_action = QAction("E&xit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        diagnostics = QAction("&Diagnostics...", self)
+        diagnostics.triggered.connect(self._show_diagnostics)
+        help_menu.addAction(diagnostics)
+
+        self._debug_action = QAction("&Slide detection debug...", self)
+        self._debug_action.setEnabled(False)
+        self._debug_action.setToolTip(
+            "Inspect why each slide boundary was or was not made, replayed from "
+            "the cached frame scan."
+        )
+        self._debug_action.triggered.connect(self._show_slide_debug)
+        help_menu.addAction(self._debug_action)
+
+        show_log = QAction("Open &log file", self)
+        show_log.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_file())))
+        )
+        help_menu.addAction(show_log)
+
+        about = QAction("&About", self)
+        about.triggered.connect(self._show_about)
+        help_menu.addAction(about)
+
+    def _connect(self) -> None:
+        self._new_action.triggered.connect(self._choose_video)
+        self._open_action.triggered.connect(self._choose_project)
+        self._close_action.triggered.connect(self._close_project)
+        self._reveal_action.triggered.connect(self._reveal_project)
+
+        self._start_view.newProjectRequested.connect(self._choose_video)
+        self._start_view.openProjectRequested.connect(self._choose_project)
+        self._start_view.videoDropped.connect(self._create_from_video)
+        self._start_view.recentSelected.connect(self._open_project_at)
+
+        self._lecture_view.transcribeRequested.connect(self._start_transcription)
+        self._lecture_view.cancelRequested.connect(self._cancel_transcription)
+        self._lecture_view.relocateRequested.connect(self._relocate_video)
+        self._lecture_view.detectSlidesRequested.connect(self._start_slide_detection)
+        self._lecture_view.cancelSlidesRequested.connect(self._cancel_slide_detection)
+        self._lecture_view.slideDeleteRequested.connect(self._delete_slide)
+        self._lecture_view.slideMergeRequested.connect(self._merge_slide)
+        self._lecture_view.slideRecaptureRequested.connect(self._recapture_slide)
+        self._lecture_view.slideSplitRequested.connect(self._split_slide)
+        self._lecture_view.slideMoveBoundaryRequested.connect(self._move_slide_boundary)
+
+    # -- project lifecycle --------------------------------------------------
+
+    def _choose_video(self) -> None:
+        start_dir = str(self.settings.get("last_video_dir", str(Path.home())))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a lecture video", start_dir, VIDEO_FILE_FILTER
+        )
+        if path:
+            self.settings.set("last_video_dir", str(Path(path).parent))
+            self._create_from_video(Path(path))
+
+    def _create_from_video(self, video_path: Path) -> None:
+        if self._busy:
+            QMessageBox.information(
+                self, "Busy", "Please wait for the current processing to finish."
+            )
+            return
+        if not video_path.is_file():
+            QMessageBox.warning(self, "File not found", f"There is no file at:\n{video_path}")
+            return
+
+        self.statusBar().showMessage(f"Reading {video_path.name}...")
+        self.setEnabled(False)
+
+        self._probe_thread = QThread(self)
+        self._probe_worker = ProbeWorker(video_path)
+        self._probe_worker.finished.connect(self._on_probe_finished)
+        self._probe_worker.failed.connect(self._on_probe_failed)
+        run_in_thread(self._probe_worker, self._probe_thread)
+
+    def _finish_probe(self) -> None:
+        self.setEnabled(True)
+        if self._probe_thread is not None:
+            self._probe_thread.quit()
+            self._probe_thread.wait(5000)
+            self._probe_thread = None
+        self._probe_worker = None
+
+    def _on_probe_failed(self, message: str) -> None:
+        self._finish_probe()
+        self.statusBar().showMessage("Ready")
+        QMessageBox.critical(self, "Could not read the video", message)
+
+    def _on_probe_finished(self, info: VideoInfo) -> None:
+        self._finish_probe()
+        self.statusBar().showMessage("Ready")
+
+        default_name = info.as_path.stem
+        name, accepted = QInputDialog.getText(
+            self, "New project", "Lecture name:", text=default_name
+        )
+        if not accepted:
+            return
+        name = name.strip() or default_name
+
+        if not info.has_audio:
+            QMessageBox.warning(
+                self,
+                "No audio track",
+                f"'{info.display_name}' has no audio track.\n\n"
+                "The project will be created and the video will play, but it "
+                "cannot be transcribed.",
+            )
+
+        projects_dir = self.settings.projects_dir
+        try:
+            projects_dir.mkdir(parents=True, exist_ok=True)
+            project = Project.create(projects_dir, name, info)
+        except (ProjectError, OSError) as exc:
+            QMessageBox.critical(self, "Could not create the project", str(exc))
+            return
+
+        self._set_project(project)
+        self.statusBar().showMessage(f"Project created in {project.root}", 8000)
+
+    def _choose_project(self) -> None:
+        start_dir = str(self.settings.projects_dir)
+        path = QFileDialog.getExistingDirectory(self, "Open a lecture project", start_dir)
+        if path:
+            self._open_project_at(Path(path))
+
+    def _open_project_at(self, root: Path) -> None:
+        if not is_project_dir(root):
+            QMessageBox.warning(
+                self,
+                "Not a project folder",
+                f"'{root.name}' does not contain a project.json file.\n\n"
+                "Choose the folder that was created for the lecture.",
+            )
+            return
+        try:
+            project = Project.open(root)
+        except ProjectError as exc:
+            QMessageBox.critical(self, "Could not open the project", str(exc))
+            return
+        self._set_project(project)
+        self.statusBar().showMessage(f"Opened {project.name}", 5000)
+
+    def _set_project(self, project: Project) -> None:
+        self.project = project
+        # Links written by an older version, or before a crash, are rebuilt
+        # from the times rather than trusted.
+        self._align()
+        self.settings.add_recent_project(project.root)
+        self._refresh_recent()
+
+        self._lecture_view.load_project(project)
+        self._stack.setCurrentWidget(self._lecture_view)
+        self.setWindowTitle(f"{project.name} - Lecture Saver")
+        self._close_action.setEnabled(True)
+        self._reveal_action.setEnabled(True)
+        self._debug_action.setEnabled(True)
+
+        if project.video_missing:
+            QMessageBox.warning(
+                self,
+                "Video not found",
+                f"The source video for this project is missing:\n{project.video.path}\n\n"
+                "Use “Locate video...” to point the project at its new location.",
+            )
+
+    def _close_project(self) -> None:
+        if not self._confirm_stop_transcription():
+            return
+        if self.project is not None:
+            try:
+                self.project.save()
+            except ProjectError:
+                log.warning("Could not save project on close", exc_info=True)
+        self.project = None
+        self._lecture_view.close_project()
+        self._stack.setCurrentWidget(self._start_view)
+        self.setWindowTitle("Lecture Saver")
+        self._close_action.setEnabled(False)
+        self._reveal_action.setEnabled(False)
+        self._debug_action.setEnabled(False)
+        self._refresh_recent()
+
+    def _reveal_project(self) -> None:
+        if self.project is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.project.root)))
+
+    def _relocate_video(self) -> None:
+        if self.project is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Locate the lecture video", str(Path.home()), VIDEO_FILE_FILTER
+        )
+        if not path:
+            return
+        self.project.relocate_video(Path(path))
+        self._lecture_view.load_project(self.project)
+        self.statusBar().showMessage("Video location updated", 5000)
+
+    def _refresh_recent(self) -> None:
+        roots = self.settings.recent_projects()
+        self._start_view.set_recent(roots)
+        self._recent_menu.clear()
+        self._recent_menu.setEnabled(bool(roots))
+        for root in roots:
+            action = QAction(root.name, self)
+            action.setToolTip(str(root))
+            action.triggered.connect(lambda _checked=False, r=root: self._open_project_at(r))
+            self._recent_menu.addAction(action)
+
+    # -- transcription ------------------------------------------------------
+
+    def _start_transcription(self, options: WhisperOptions) -> None:
+        if self.project is None or self._busy:
+            return
+
+        if self.project.has_transcript:
+            answer = QMessageBox.question(
+                self,
+                "Replace the existing transcript?",
+                "This lecture already has a transcript. Transcribing again will "
+                "replace it, including any manual edits.\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        self.settings.set_transcription_defaults(
+            {
+                "model_size": options.model_size,
+                "language": options.language,
+                "vad_filter": options.vad_filter,
+            }
+        )
+
+        self._lecture_view.pause_playback()
+        self._lecture_view.begin_transcription()
+        self._set_project_actions_enabled(False)
+
+        self._transcribe_thread = QThread(self)
+        self._transcribe_worker = TranscriptionWorker(self.project, options)
+        self._transcribe_worker.progress.connect(self._on_transcription_progress)
+        self._transcribe_worker.finished.connect(self._on_transcription_finished)
+        self._transcribe_worker.failed.connect(self._on_transcription_failed)
+        self._transcribe_worker.cancelled.connect(self._on_transcription_cancelled)
+        run_in_thread(self._transcribe_worker, self._transcribe_thread)
+
+    def _on_transcription_progress(self, stage: str, fraction: float, message: str) -> None:
+        self._lecture_view.update_progress(stage, fraction, message)
+        self.statusBar().showMessage(f"{stage} — {message}" if message else stage)
+
+    def _finish_transcription(self) -> None:
+        if self._transcribe_thread is not None:
+            self._transcribe_thread.quit()
+            self._transcribe_thread.wait(15000)
+            self._transcribe_thread = None
+        self._transcribe_worker = None
+        self._set_project_actions_enabled(True)
+
+    def _on_transcription_finished(self, result: object) -> None:
+        self._finish_transcription()
+        self._align()
+        self._lecture_view.refresh_transcript()
+
+        count = len(self.project.transcript) if self.project else 0
+        language = getattr(result, "language", None)
+        summary = f"Transcript ready — {count} segments"
+        if language:
+            summary += f" ({language})"
+        self._lecture_view.end_transcription(summary + ".")
+        self.statusBar().showMessage(summary, 10000)
+
+        note = getattr(result, "fallback_note", None)
+        if note:
+            QMessageBox.information(self, "Transcription finished", note)
+
+    def _on_transcription_failed(self, message: str) -> None:
+        self._finish_transcription()
+        self._align()
+        self._lecture_view.refresh_transcript()
+        self._lecture_view.end_transcription("Transcription failed.")
+        self.statusBar().showMessage("Transcription failed", 8000)
+        QMessageBox.critical(self, "Transcription failed", message)
+
+    def _on_transcription_cancelled(self) -> None:
+        self._finish_transcription()
+        self._align()
+        self._lecture_view.refresh_transcript()
+        count = len(self.project.transcript) if self.project else 0
+        self._lecture_view.end_transcription(
+            f"Cancelled. {count} segments were kept." if count else "Cancelled."
+        )
+        self.statusBar().showMessage("Transcription cancelled", 6000)
+
+    def _cancel_transcription(self) -> None:
+        if self._transcribe_worker is not None:
+            self._transcribe_worker.cancel()
+            self.statusBar().showMessage("Cancelling...")
+
+    def _confirm_stop_transcription(self) -> bool:
+        if self._transcribe_thread is None:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Transcription in progress",
+            "A transcription is still running. Stop it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self._cancel_transcription()
+        if self._transcribe_thread is not None:
+            self._transcribe_thread.quit()
+            self._transcribe_thread.wait(20000)
+            self._transcribe_thread = None
+        return True
+
+    # -- slide detection (§8) ----------------------------------------------
+
+    def _start_slide_detection(self) -> None:
+        if self.project is None or self._busy:
+            return
+        if self.project.video_missing:
+            QMessageBox.warning(
+                self, "Video not found",
+                "The source video is missing, so slides cannot be detected.",
+            )
+            return
+
+        if self.project.has_slides:
+            warning = (
+                "This lecture already has detected slides. Running detection "
+                "again replaces them and their images."
+            )
+            if self.project.slides.manually_edited:
+                warning += "\n\nYour manual corrections to the slides will be lost."
+            answer = QMessageBox.question(
+                self,
+                "Detect slides again?",
+                warning + "\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        options = self.project.meta.slide_detection or SlideDetectionOptions()
+
+        self._lecture_view.pause_playback()
+        self._lecture_view.begin_slide_detection()
+        self._set_project_actions_enabled(False)
+
+        self._slides_thread = QThread(self)
+        self._slides_worker = SlideDetectionWorker(self.project, options)
+        self._slides_worker.progress.connect(self._on_slides_progress)
+        self._slides_worker.finished.connect(self._on_slides_finished)
+        self._slides_worker.failed.connect(self._on_slides_failed)
+        self._slides_worker.cancelled.connect(self._on_slides_cancelled)
+        run_in_thread(self._slides_worker, self._slides_thread)
+
+    def _on_slides_progress(self, stage: str, fraction: float, message: str) -> None:
+        self._lecture_view.update_slide_progress(stage, fraction, message)
+        self.statusBar().showMessage(f"{stage} — {message}" if message else stage)
+
+    def _finish_slide_detection(self) -> None:
+        if self._slides_thread is not None:
+            self._slides_thread.quit()
+            self._slides_thread.wait(15000)
+            self._slides_thread = None
+        self._slides_worker = None
+        self._set_project_actions_enabled(True)
+
+    def _on_slides_finished(self, slide_set: object) -> None:
+        self._finish_slide_detection()
+        self._align()
+        self._lecture_view.refresh_slides()
+
+        count = len(self.project.slides) if self.project else 0
+        summary = f"{count} slides detected"
+        self._lecture_view.end_slide_detection(summary + ".")
+        self.statusBar().showMessage(summary, 10000)
+
+    def _on_slides_failed(self, message: str) -> None:
+        self._finish_slide_detection()
+        self._lecture_view.end_slide_detection("Slide detection failed.")
+        self.statusBar().showMessage("Slide detection failed", 8000)
+        QMessageBox.critical(self, "Slide detection failed", message)
+
+    def _on_slides_cancelled(self) -> None:
+        self._finish_slide_detection()
+        self._align()
+        self._lecture_view.refresh_slides()
+        self._lecture_view.end_slide_detection("Slide detection cancelled.")
+        self.statusBar().showMessage("Slide detection cancelled", 6000)
+
+    def _cancel_slide_detection(self) -> None:
+        if self._slides_worker is not None:
+            self._slides_worker.cancel()
+            self.statusBar().showMessage("Cancelling...")
+
+    # -- manual slide correction -------------------------------------------
+    #
+    # Automatic detection is a first draft. No detector gets every lecture
+    # style right, so the user must be able to fix it before the transcript is
+    # aligned to slides and exported.
+
+    def _edit_slides(self, action: Callable[[SlideSet], object], success: str) -> None:
+        """Apply a slide edit, persist it, and refresh the navigator.
+
+        Every correction goes through here, so none of them can change memory
+        without also reaching disk.
+        """
+        if self.project is None or self._busy:
+            return
+        try:
+            action(self.project.slides)
+        except SlideEditError as exc:
+            QMessageBox.warning(self, "Cannot change the slides", str(exc))
+            return
+        except MediaError as exc:
+            QMessageBox.warning(self, "Cannot capture that frame", str(exc))
+            return
+
+        try:
+            self.project.save_slides()
+        except ProjectError as exc:
+            QMessageBox.critical(self, "Could not save the slides", str(exc))
+            return
+
+        # Speech follows the corrected intervals immediately.
+        self._align()
+        self._lecture_view.refresh_slides()
+        self.statusBar().showMessage(success, 6000)
+
+    def _delete_slide(self, appearance_id: int) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Delete this slide?",
+            f"Slide {appearance_id} will be removed and its time given to the "
+            "slide before it.\n\nThe transcript text is not affected; what was "
+            "said on this slide moves to its neighbour.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._edit_slides(
+            lambda slides: delete_appearance(slides, appearance_id),
+            f"Slide {appearance_id} deleted",
+        )
+
+    def _merge_slide(self, appearance_id: int) -> None:
+        self._edit_slides(
+            lambda slides: merge_with_previous(slides, appearance_id),
+            f"Slide {appearance_id} merged into the previous slide",
+        )
+
+    def _split_slide(self, seconds: float) -> None:
+        def apply(slides: SlideSet) -> None:
+            assert self.project is not None
+            created = split_at(slides, seconds)
+            image = capture_slide_image(
+                self.project, created.slide_id, seconds, self.project.meta.slide_detection
+            )
+            set_slide_image(slides, created.slide_id, image)
+
+        self._edit_slides(apply, f"New slide added at {format_hms(seconds)}")
+
+    def _move_slide_boundary(self, appearance_id: int, seconds: float) -> None:
+        self._edit_slides(
+            lambda slides: move_boundary(slides, appearance_id, seconds),
+            f"Slide {appearance_id} now starts at {format_hms(seconds)}",
+        )
+
+    def _recapture_slide(self, appearance_id: int, seconds: float) -> None:
+        def apply(slides: SlideSet) -> None:
+            assert self.project is not None
+            appearance = next(
+                (a for a in slides.appearances if a.appearance_id == appearance_id), None
+            )
+            if appearance is None:
+                raise SlideEditError(f"There is no slide numbered {appearance_id}.")
+            image = capture_slide_image(
+                self.project, appearance.slide_id, seconds,
+                self.project.meta.slide_detection,
+            )
+            set_slide_image(slides, appearance.slide_id, image)
+
+        self._edit_slides(apply, f"Slide {appearance_id} image re-captured")
+
+    # -- transcript-to-slide alignment (§10) -------------------------------
+
+    def _align(self) -> None:
+        """Re-link the transcript to the slides after either changes.
+
+        Failing to save the links is reported but never blocks the work that
+        triggered it: the links are rebuilt from the times on the next change.
+        """
+        if self.project is None:
+            return
+        try:
+            self.project.align()
+        except ProjectError as exc:
+            log.warning("Could not save the transcript-to-slide links", exc_info=True)
+            self.statusBar().showMessage(f"Could not save slide links: {exc}", 8000)
+
+    # -- shared run-state helpers ------------------------------------------
+
+    @property
+    def _busy(self) -> bool:
+        """True while any background pipeline is running."""
+        return self._transcribe_thread is not None or self._slides_thread is not None
+
+    def _set_project_actions_enabled(self, enabled: bool) -> None:
+        self._new_action.setEnabled(enabled)
+        self._open_action.setEnabled(enabled)
+        self._close_action.setEnabled(enabled)
+
+    # -- help ---------------------------------------------------------------
+
+    def _show_diagnostics(self) -> None:
+        from PySide6.QtCore import qVersion
+        from PySide6.QtMultimedia import QMediaDevices
+
+        try:
+            ffmpeg = str(find_ffmpeg())
+        except FFmpegNotFoundError:
+            ffmpeg = "NOT FOUND"
+        ffprobe = find_ffprobe()
+
+        try:
+            import faster_whisper
+
+            whisper_line = f"faster-whisper {faster_whisper.__version__}"
+        except Exception as exc:  # noqa: BLE001
+            whisper_line = f"faster-whisper unavailable ({exc})"
+
+        import shutil
+
+        free = shutil.disk_usage(Path.home()).free
+
+        outputs = QMediaDevices.audioOutputs()
+        lines = [
+            f"Qt: {qVersion()}",
+            f"FFmpeg: {ffmpeg}",
+            f"ffprobe: {ffprobe or 'not found (banner parsing will be used)'}",
+            whisper_line,
+            f"Free disk: {free / 1e9:.1f} GB",
+            f"Audio outputs: {len(outputs)}",
+            f"Log file: {log_file()}",
+            f"Projects folder: {self.settings.projects_dir}",
+        ]
+        QMessageBox.information(self, "Diagnostics", "\n".join(lines))
+
+    def _show_slide_debug(self) -> None:
+        if self.project is None:
+            return
+        from .slide_debug import SlideDebugDialog
+
+        SlideDebugDialog(self.project, self).show()
+
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "About Lecture Saver",
+            "<h3>Lecture Saver</h3>"
+            "<p>Local lecture transcription and slide-linked notes.</p>"
+            "<p><b>Everything runs on this computer.</b> Video, audio and "
+            "transcripts are never uploaded. The only time an internet "
+            "connection is needed is the first download of a Whisper model.</p>"
+            "<p>Currently implemented: project management, video playback and "
+            "local transcription (Phases 1-2). Slide detection, transcript "
+            "editing and PDF export are not built yet.</p>",
+        )
+
+    # -- window state -------------------------------------------------------
+
+    def _restore_geometry(self) -> None:
+        geometry = self.settings.get("window_geometry")
+        if isinstance(geometry, list) and len(geometry) == 4:
+            try:
+                self.setGeometry(*(int(v) for v in geometry))
+            except (TypeError, ValueError):
+                pass
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt naming
+        if not self._confirm_stop_transcription():
+            event.ignore()
+            return
+
+        rect = self.geometry()
+        self.settings.set("window_geometry", [rect.x(), rect.y(), rect.width(), rect.height()])
+
+        if self.project is not None:
+            try:
+                self.project.save()
+            except ProjectError:
+                log.warning("Could not save project on exit", exc_info=True)
+        event.accept()
