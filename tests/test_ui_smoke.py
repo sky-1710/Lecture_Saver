@@ -768,3 +768,324 @@ class TestAlignmentFromTheWindow:
         assert window._lecture_view._transcript.segment_count == 3
         reopened = Project.open(window.project.root)
         assert [s.slide_id for s in reopened.transcript.segments] == [1, 1, 1]
+
+
+# --------------------------------------------------------------------------
+# Transcript editing (Phase 5)
+# --------------------------------------------------------------------------
+
+
+def _open_editor(view, segment_id):
+    from lecture_saver.ui.transcript_view import SegmentEditor
+
+    assert view._transcript.edit_segment(segment_id)
+    QApplication.processEvents()
+    editor = view._transcript.findChild(SegmentEditor)
+    assert isinstance(editor, SegmentEditor)
+    return editor
+
+
+@pytest.fixture
+def editing_view(qapp, project_with_slides):
+    view = LectureView()
+    view.resize(1200, 800)
+    view.load_project(project_with_slides)
+    view._tabs.setCurrentIndex(1)  # full transcript: every segment in one list
+    view.show()
+    QApplication.processEvents()
+    yield view
+    view.close()
+
+
+class TestInlineEditing:
+    def test_typing_changes_the_one_transcript(self, editing_view, project_with_slides):
+        from PySide6.QtTest import QTest
+
+        edited: list[bool] = []
+        editing_view.transcriptEdited.connect(edited.append)
+        editor = _open_editor(editing_view, "segment_002")
+        QTest.keyClicks(editor, "!")
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+
+        segment = project_with_slides.transcript.get("segment_002")
+        assert segment.effective_text == "여기서 러닝레이트를 보시면!"
+        assert segment.original_text == "여기서 러닝레이트를 보시면"
+        assert edited and edited[-1] is False
+        assert not editing_view._transcript.is_editing
+
+        # The slide view shows the same edited text (§16).
+        editing_view._tabs.setCurrentIndex(0)
+        editing_view._on_position(12.0)
+        assert "여기서 러닝레이트를 보시면!" in _texts(editing_view)
+
+    def test_escape_puts_the_text_back_and_leaves_nothing_to_undo(
+        self, editing_view, project_with_slides
+    ):
+        from PySide6.QtTest import QTest
+
+        editor = _open_editor(editing_view, "segment_001")
+        QTest.keyClicks(editor, " typo")
+        QTest.keyClick(editor, Qt.Key.Key_Escape)
+
+        store = project_with_slides.transcript
+        assert store.get("segment_001").edited_text is None
+        assert not store.can_undo
+        assert not editing_view._undo_action.isEnabled()
+
+    def test_undo_and_redo_follow_the_history(self, editing_view, project_with_slides):
+        from PySide6.QtTest import QTest
+
+        editor = _open_editor(editing_view, "segment_001")
+        QTest.keyClicks(editor, "!!")
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+        assert editing_view._undo_action.isEnabled()
+
+        editing_view.undo()
+        store = project_with_slides.transcript
+        assert store.get("segment_001").edited_text is None
+        assert editing_view._redo_action.isEnabled()
+
+        editing_view.redo()
+        assert store.get("segment_001").effective_text.endswith("!!")
+
+    def test_edited_segments_are_marked_and_show_their_original(self, editing_view):
+        from lecture_saver.ui.transcript_view import ROLE_IS_EDITED
+
+        model = editing_view._transcript.model()
+        index = model.index(editing_view._transcript.row_of("segment_003"), 0)
+        assert index.data(ROLE_IS_EDITED) is True
+        assert "Original: If this value is too large" in index.data(Qt.ItemDataRole.ToolTipRole)
+
+    def test_ctrl_enter_splits_at_the_cursor(self, editing_view, project_with_slides):
+        from PySide6.QtTest import QTest
+
+        editor = _open_editor(editing_view, "segment_003")
+        cursor = editor.textCursor()
+        cursor.setPosition(len("If the value is too large,"))
+        editor.setTextCursor(cursor)
+        QTest.keyClick(editor, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
+
+        texts = [s.effective_text for s in project_with_slides.transcript.segments]
+        assert texts[-2:] == ["If the value is too large,", "the model diverges."]
+        assert editing_view._transcript.segment_count == 4
+
+    def test_merge_restore_insert_and_delete_from_the_menu_signals(
+        self, editing_view, project_with_slides
+    ):
+        store = project_with_slides.transcript
+        view = editing_view._transcript
+
+        view.restoreRequested.emit("segment_003")
+        assert store.get("segment_003").edited_text is None
+
+        view.mergeRequested.emit("segment_001")
+        assert len(store) == 2
+
+        view.insertRequested.emit("segment_001")
+        assert len(store) == 3
+        assert view.is_editing, "a new segment opens for typing straight away"
+        view.finish_editing()
+
+        view.deleteRequested.emit(store.segments[1].id)
+        assert len(store) == 2
+        editing_view.undo()
+        assert len(store) == 3
+
+    def test_playback_does_not_pull_the_list_away_from_typing(self, qapp, project_with_slides):
+        view = LectureView()
+        view.resize(1200, 800)
+        view.load_project(project_with_slides)
+        view.show()
+        QApplication.processEvents()
+        _open_editor(view, "segment_001")
+
+        view._on_position(35.0)  # slide 2 is on screen now
+
+        assert view._transcript.is_editing
+        assert "Slide 1" in view._slide_title.text()
+        view.close()
+
+    def test_a_structural_edit_is_announced_as_such(self, editing_view):
+        seen: list[bool] = []
+        editing_view.transcriptEdited.connect(seen.append)
+        editing_view._transcript.mergeRequested.emit("segment_001")
+        assert seen == [True]
+
+
+class TestFindAndReplaceUI:
+    def test_find_counts_and_steps_across_slides(self, qapp, project_with_slides):
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view.open_find()
+        view._find_bar.set_query("the")
+
+        assert "3 matches" in view._find_bar.result_text
+
+        view._step_match(1)
+        view._step_match(1)
+        view._step_match(1)  # "If the value ..." is on slide 2
+        assert "3 of 3" in view._find_bar.result_text
+        assert "Slide 2" in view._slide_title.text()
+
+    def test_replace_all_is_one_undoable_step(self, qapp, project_with_slides):
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view.open_find()
+        view._find_bar.set_query("the")
+        view._find_bar.set_replacement("THE")
+        view._replace_all()
+
+        store = project_with_slides.transcript
+        assert store.find("THE", case_sensitive=True)
+        assert not store.find("the", case_sensitive=True)
+        view.undo()
+        assert store.find("the", case_sensitive=True)
+
+    def test_replace_one_replaces_the_current_match(self, qapp, project_with_slides):
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view.open_find()
+        view._find_bar.set_query("러닝레이트")
+        view._find_bar.set_replacement("learning rate")
+        view._step_match(1)
+        view._replace_current()
+
+        segment = project_with_slides.transcript.get("segment_002")
+        assert segment.effective_text == "여기서 learning rate를 보시면"
+        assert segment.original_text == "여기서 러닝레이트를 보시면"
+        assert "No matches" in view._find_bar.result_text
+
+
+class TestEditingFromTheWindow:
+    @pytest.fixture
+    def window(self, qapp, tmp_path, project_with_slides):
+        win = MainWindow(Settings(tmp_path / "settings.json"))
+        win._open_project_at(project_with_slides.root)
+        yield win
+        win.close()
+
+    def test_the_edit_menu_offers_undo_redo_and_find(self, window):
+        assert window._edit_menu.title() == "&Edit"
+        names = [a.text() for a in window._edit_menu.actions()]
+        assert names[:2] == ["Undo", "Redo"]
+
+    def test_edits_are_autosaved_after_a_pause(self, window):
+        from PySide6.QtTest import QTest
+
+        view = window._lecture_view
+        view._on_text_edited("segment_001", "Autosaved text")
+        assert window._autosave.pending
+
+        QTest.qWait(1_100)
+
+        assert not window._autosave.pending
+        reopened = Project.open(window.project.root)
+        assert reopened.transcript.get("segment_001").effective_text == "Autosaved text"
+        assert "saved" in view._save_label.text().lower()
+
+    def test_closing_the_project_flushes_pending_edits(self, window):
+        root = window.project.root
+        window._lecture_view._on_text_edited("segment_002", "flushed on close")
+        window._close_project()
+
+        reopened = Project.open(root)
+        assert reopened.transcript.get("segment_002").effective_text == "flushed on close"
+
+    def test_a_merge_across_slides_relinks_and_saves(self, window):
+        view = window._lecture_view
+        view._transcript.mergeRequested.emit("segment_002")  # 10-20 + 30-40
+        window._autosave.flush()
+
+        reopened = Project.open(window.project.root)
+        assert [s.slide_id for s in reopened.transcript.segments] == [1, 1]
+
+
+class TestResetToOriginalUI:
+    @pytest.fixture
+    def answer(self, monkeypatch):
+        """Record the confirmation question and answer it."""
+        from PySide6.QtWidgets import QMessageBox
+
+        asked: list[str] = []
+        reply = {"value": QMessageBox.StandardButton.Yes}
+
+        def fake_question(parent, title, text, *args, **kwargs):
+            asked.append(text)
+            return reply["value"]
+
+        monkeypatch.setattr(QMessageBox, "question", fake_question)
+        return asked, reply
+
+    def _view(self, project):
+        project.save_original_transcript()
+        view = LectureView()
+        view.load_project(project)
+        return view
+
+    def test_reset_restores_the_transcription_and_undo_brings_edits_back(
+        self, qapp, project_with_slides, answer
+    ):
+        store = project_with_slides.transcript
+        # The fixture's segment_003 carries an edit; keep the original without it.
+        view = self._view(project_with_slides)
+        view._transcript.mergeRequested.emit("segment_001")
+        assert len(store) == 2
+
+        view.reset_to_original()
+
+        asked, _ = answer
+        assert asked and "merged, split, added or deleted" in asked[0]
+        assert len(store) == 3
+        assert all(s.edited_text is None for s in store.segments)
+        assert view._transcript.segment_count >= 1
+
+        view.undo()
+        assert len(store) == 2
+
+    def test_saying_no_changes_nothing(self, qapp, project_with_slides, answer):
+        from PySide6.QtWidgets import QMessageBox
+
+        _, reply = answer
+        reply["value"] = QMessageBox.StandardButton.No
+        store = project_with_slides.transcript
+        view = self._view(project_with_slides)
+        store.edit_text("segment_001", "keep me")
+
+        view.reset_to_original()
+
+        assert store.get("segment_001").effective_text == "keep me"
+
+    def test_an_unedited_transcript_is_not_reset_and_says_so(
+        self, qapp, project_with_slides, answer
+    ):
+        store = project_with_slides.transcript
+        store.restore_original("segment_003")
+        view = self._view(project_with_slides)
+        messages: list[str] = []
+        view.statusMessage.connect(messages.append)
+
+        view.reset_to_original()
+
+        asked, _ = answer
+        assert asked == []
+        assert messages and "already the original" in messages[0]
+
+    def test_without_a_kept_original_the_question_explains_the_limit(
+        self, qapp, project_with_slides, answer
+    ):
+        view = LectureView()
+        view.load_project(project_with_slides)  # no original kept
+
+        view.reset_to_original()
+
+        asked, _ = answer
+        assert asked and "before the original transcription was kept" in asked[0]
+        assert project_with_slides.transcript.get("segment_003").edited_text is None
+
+    def test_reset_is_offered_in_the_edit_menu(self, qapp, tmp_path, project_with_slides):
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        try:
+            names = [a.text() for a in window._edit_menu.actions()]
+            assert any(name.startswith("Reset to original") for name in names)
+        finally:
+            window.close()

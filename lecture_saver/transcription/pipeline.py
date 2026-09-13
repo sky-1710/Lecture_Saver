@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..core.models import StageStatus, TranscriptSegment, make_segment_id
-from ..core.project import Project
+from ..core.project import Project, ProjectError
 from ..media.errors import Cancelled, MediaError, MissingVideoFileError, NoAudioTrackError
 from ..media.ffmpeg_tools import extract_audio
 from .whisper_engine import (
@@ -223,14 +223,27 @@ class TranscriptionPipeline:
         settings.resolved_compute_type = result.compute_type
 
         self.project.save(force_transcript=True)
+        self._keep_original()
         self.project.set_stage("transcription", StageStatus.DONE)
         return result
+
+    def _keep_original(self) -> None:
+        """Record Whisper's output so the transcript can be reset to it later.
+
+        Losing this only costs the full reset, never the transcription, so a
+        failure is logged rather than raised.
+        """
+        try:
+            self.project.save_original_transcript()
+        except ProjectError:
+            log.warning("Could not keep the original transcription", exc_info=True)
 
     def _flush(self, collected: list[TranscriptSegment]) -> None:
         """Persist partial results so a crash does not cost the whole run."""
         try:
             self.project.transcript.replace_all(list(collected))
             self.project.transcript.save(force=True)
+            self._keep_original()
         except OSError:
             # A failed intermediate flush must not abort a long transcription;
             # the final save will surface any real persistent problem.

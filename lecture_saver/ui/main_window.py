@@ -34,6 +34,7 @@ from ..media.errors import FFmpegNotFoundError, MediaError
 from ..media.ffmpeg_tools import VIDEO_FILE_FILTER, find_ffmpeg, find_ffprobe
 from ..slides.pipeline import capture_slide_image
 from ..transcription.whisper_engine import WhisperOptions
+from .autosave import Autosave
 from .lecture_view import LectureView
 from .start_view import StartView
 from .workers import ProbeWorker, SlideDetectionWorker, TranscriptionWorker, run_in_thread
@@ -66,6 +67,9 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._start_view)
         self._stack.addWidget(self._lecture_view)
         self.setCentralWidget(self._stack)
+
+        #: Transcript edits are written once typing pauses (§15).
+        self._autosave = Autosave(self._save_transcript, parent=self)
 
         self._build_menus()
         self._connect()
@@ -102,6 +106,10 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        self._edit_menu = self.menuBar().addMenu("&Edit")
+        for action in self._lecture_view.edit_actions:
+            self._edit_menu.addAction(action)
 
         help_menu = self.menuBar().addMenu("&Help")
         diagnostics = QAction("&Diagnostics...", self)
@@ -148,6 +156,14 @@ class MainWindow(QMainWindow):
         self._lecture_view.slideRecaptureRequested.connect(self._recapture_slide)
         self._lecture_view.slideSplitRequested.connect(self._split_slide)
         self._lecture_view.slideMoveBoundaryRequested.connect(self._move_slide_boundary)
+        self._lecture_view.transcriptEdited.connect(self._on_transcript_edited)
+        self._lecture_view.statusMessage.connect(
+            lambda message: self.statusBar().showMessage(message, 5000)
+        )
+        self._autosave.saved.connect(
+            lambda: self._lecture_view.set_save_status("All changes saved")
+        )
+        self._autosave.failed.connect(self._on_autosave_failed)
 
     # -- project lifecycle --------------------------------------------------
 
@@ -248,6 +264,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Opened {project.name}", 5000)
 
     def _set_project(self, project: Project) -> None:
+        self._flush_edits()
         self.project = project
         # Links written by an older version, or before a crash, are rebuilt
         # from the times rather than trusted.
@@ -273,6 +290,7 @@ class MainWindow(QMainWindow):
     def _close_project(self) -> None:
         if not self._confirm_stop_transcription():
             return
+        self._flush_edits()
         if self.project is not None:
             try:
                 self.project.save()
@@ -320,6 +338,7 @@ class MainWindow(QMainWindow):
         if self.project is None or self._busy:
             return
 
+        self._flush_edits()
         if self.project.has_transcript:
             answer = QMessageBox.question(
                 self,
@@ -598,7 +617,7 @@ class MainWindow(QMainWindow):
 
     # -- transcript-to-slide alignment (§10) -------------------------------
 
-    def _align(self) -> None:
+    def _align(self, *, save: bool = True) -> None:
         """Re-link the transcript to the slides after either changes.
 
         Failing to save the links is reported but never blocks the work that
@@ -607,10 +626,36 @@ class MainWindow(QMainWindow):
         if self.project is None:
             return
         try:
-            self.project.align()
+            self.project.align(save=save)
         except ProjectError as exc:
             log.warning("Could not save the transcript-to-slide links", exc_info=True)
             self.statusBar().showMessage(f"Could not save slide links: {exc}", 8000)
+
+    # -- transcript editing and autosave (§13, §15) ------------------------
+
+    def _on_transcript_edited(self, structural: bool) -> None:
+        if self.project is None:
+            return
+        if structural:
+            # Merge, split, add and delete change what each slide holds; the
+            # write is left to autosave like any other edit.
+            self._align(save=False)
+        self._lecture_view.set_save_status("Saving...")
+        self._autosave.schedule()
+
+    def _save_transcript(self) -> bool:
+        if self.project is None:
+            return False
+        return self.project.transcript.save()
+
+    def _flush_edits(self) -> None:
+        """Write pending edits now - before closing, switching or replacing."""
+        if self._autosave.pending or (self.project and self.project.transcript.is_dirty):
+            self._autosave.flush()
+
+    def _on_autosave_failed(self, message: str) -> None:
+        self._lecture_view.set_save_status("Not saved", error=True)
+        self.statusBar().showMessage(message, 15000)
 
     # -- shared run-state helpers ------------------------------------------
 
@@ -676,9 +721,10 @@ class MainWindow(QMainWindow):
             "<p><b>Everything runs on this computer.</b> Video, audio and "
             "transcripts are never uploaded. The only time an internet "
             "connection is needed is the first download of a Whisper model.</p>"
-            "<p>Currently implemented: project management, video playback and "
-            "local transcription (Phases 1-2). Slide detection, transcript "
-            "editing and PDF export are not built yet.</p>",
+            "<p>Currently implemented: project management, video playback, "
+            "local transcription, slide detection, transcript-to-slide "
+            "alignment and transcript editing (Phases 1-5). Export is not "
+            "built yet.</p>",
         )
 
     # -- window state -------------------------------------------------------
@@ -699,6 +745,7 @@ class MainWindow(QMainWindow):
         rect = self.geometry()
         self.settings.set("window_geometry", [rect.x(), rect.y(), rect.width(), rect.height()])
 
+        self._flush_edits()
         if self.project is not None:
             try:
                 self.project.save()

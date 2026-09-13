@@ -8,8 +8,8 @@ cloud transcription service, no analytics, no telemetry, and no local server
 listening on a port. The only time an internet connection is needed at all is
 the first download of a Whisper model; after that the application works offline.
 
-**Current status: Phases 1–4 are implemented and working.** Transcript
-editing and PDF export are not built yet — see
+**Current status: Phases 1–5 are implemented and working.** PDF and transcript
+export are not built yet — see
 [What works today](#what-works-today) for the exact line.
 
 ---
@@ -89,6 +89,9 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
 5. **Navigate.** Click any transcript segment or slide thumbnail to jump the
    video there. As the video plays, the matching transcript segment is
    highlighted and scrolled into view.
+6. **Correct the transcript.** Double-click a line to fix it; right-click for
+   merge, add, delete and restore original; Ctrl+F to find and replace a
+   repeated mistake. Edits save themselves.
 
 Reopening a project restores everything.
 
@@ -179,6 +182,39 @@ to one language for the whole recording.
   seeks there; clicking a segment seeks there. Untick *Follow playback* (under
   the video) to keep reading one slide while the video plays on
 
+### Phase 5 — Transcript editing ✅
+
+- **Inline editing** in both the current-slide and full-transcript tabs:
+  double-click a line or press F2, type, and press Enter. Escape puts the line
+  back as it was. What you type goes into the one transcript immediately, so
+  the other tab - and later every export - shows it too
+- **Whisper's output is never overwritten.** Corrections go to `edited_text`;
+  edited lines are marked *edited*, and hovering shows the original. Typing the
+  original back clears the edit
+- Right-click a line: **restore original transcription**, **merge with next
+  segment**, **add segment after** (opens straight away for typing), **delete
+  segment**. Ctrl+Enter in the editor (or its right-click menu) **splits** the
+  segment at the cursor; time is divided in proportion to the text
+- Merge and split keep the originals too: a merged line's original is both
+  originals joined, and split divides the original at the matching word
+- **Undo / Redo** (Ctrl+Z, Ctrl+Y) for every operation, including replace-all.
+  Typing a sentence is one undo step, not one per character
+- **Find & replace** (Ctrl+F / Ctrl+H): match count, step through matches -
+  switching to the slide a match is on - replace one or replace all as a single
+  undoable step. Search and replacement text are literal, never patterns
+- **Autosave**: written 0.75 s after the last change, atomically, and flushed
+  immediately when closing the project or the application, switching project,
+  or starting a new transcription. The status next to the edit buttons says
+  when everything is saved
+- **Reset to original transcription** (edit bar or Edit menu) discards every
+  correction and restores the transcript exactly as it was transcribed,
+  including merged, split, added and deleted lines. It asks first and Undo
+  brings the corrections back. The transcription run keeps Whisper's output
+  in `transcript_original.json` for this; a lecture transcribed before that
+  file existed can only have its text edits reset
+- Structural edits re-link the transcript to slides at once
+- While you type, playback never switches the slide or scrolls the list away
+
 ### Not built yet
 
 These are **visibly marked as unavailable in the UI** rather than being stubs
@@ -186,7 +222,6 @@ that look like they work:
 
 | Phase | Feature |
 |---|---|
-| 5 | Transcript editing, autosave, undo/redo, merge/split, find & replace |
 | 6 | Slide + transcript PDF, TXT / Markdown / SRT / VTT / JSON export |
 | 7 | Duplicate slide detection (recognising a returned-to slide), search |
 
@@ -203,6 +238,8 @@ without a migration. Nothing compares fingerprints yet.
 Lecture 01/
   project.json                  video reference, metadata, stage states, settings
   transcript.json               the authoritative transcript
+  transcript_original.json      Whisper's output as transcribed, kept for
+                                "Reset to original"; never touched by editing
   slides.json                   detected slides and their appearance intervals
   audio/lecture.wav             16 kHz mono, regenerable — safe to delete
   slides/001.jpg …              representative image per slide
@@ -228,10 +265,12 @@ A transcript segment:
 }
 ```
 
-`original_text` is written once and never modified. Once editing exists (Phase 5)
-your corrections go to `edited_text`, and everything displayed or exported uses
-`edited_text` when present and `original_text` otherwise — so the original
-Whisper output is always recoverable.
+`original_text` is written once by transcription and never modified by editing
+text. Your corrections go to `edited_text`, and everything displayed or exported
+uses `edited_text` when present and `original_text` otherwise — so the original
+Whisper output is always recoverable with *Restore original transcription*.
+`slide_id` is filled in by alignment and recomputed whenever the transcript or
+the slides change.
 
 ---
 

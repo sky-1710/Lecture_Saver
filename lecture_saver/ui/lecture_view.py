@@ -13,16 +13,22 @@ other and the rules can be changed in one place:
   current-slide tab, shows its transcript - while "Follow playback" is on.
 * Clicking a slide shows it and seeks to its start.
 * Clicking a segment seeks to it; the slide then follows from the position.
+* While a segment is being typed in, playback never moves the list away from it.
+
+Transcript edits made here are applied to the project's single transcript store
+and announced with :attr:`LectureView.transcriptEdited`, so the window can
+re-link slides and schedule autosave (§13-§16).
 """
 
 from __future__ import annotations
 
 import bisect
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QAction, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -33,6 +39,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QTabBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -41,7 +48,9 @@ from ..core.alignment import Alignment, align
 from ..core.project import Project
 from ..core.slides import SlideAppearance, SlideSet
 from ..core.timecode import format_duration, format_hms
+from ..core.transcript_store import TextMatch, TranscriptEditError, TranscriptStore
 from ..transcription.whisper_engine import WhisperOptions
+from .find_bar import FindBar
 from .slide_panel import SlidePanel
 from .transcribe_panel import TranscribePanel
 from .transcript_view import TranscriptView
@@ -74,6 +83,11 @@ class LectureView(QWidget):
     slideMoveBoundaryRequested = Signal(int, float)
     #: The project's source video is missing and the user wants to relocate it.
     relocateRequested = Signal()
+    #: The transcript changed. ``True`` when segments were added, removed,
+    #: merged or split - i.e. the slide links may have changed too.
+    transcriptEdited = Signal(bool)
+    #: A short message for the status bar.
+    statusMessage = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -88,8 +102,11 @@ class LectureView(QWidget):
         #: Global segment index -> row in the transcript list as filtered now.
         self._rows: dict[int, int] = {}
         self._preview_cache: dict[str, QPixmap] = {}
+        self._matches: list[TextMatch] = []
+        self._match_index = -1
 
         self._build()
+        self._build_edit_actions()
         self._connect()
 
     # -- construction -------------------------------------------------------
@@ -167,6 +184,33 @@ class LectureView(QWidget):
         transcript_bar.addWidget(self._tabs)
         transcript_bar.addStretch(1)
 
+        # Editing controls. The buttons are bound to the actions built in
+        # _build_edit_actions, which also carry the keyboard shortcuts.
+        self._undo_button = QToolButton()
+        self._redo_button = QToolButton()
+        self._find_button = QToolButton()
+        self._reset_button = QToolButton()
+        self._save_label = QLabel("")
+        self._save_label.setStyleSheet("color: #888;")
+        self._edit_hint = QLabel("Double-click a line to correct it")
+        self._edit_hint.setStyleSheet("color: #888;")
+        self._edit_bar = QWidget()
+        edit_layout = QHBoxLayout(self._edit_bar)
+        edit_layout.setContentsMargins(12, 0, 12, 4)
+        edit_layout.setSpacing(4)
+        edit_layout.addWidget(self._undo_button)
+        edit_layout.addWidget(self._redo_button)
+        edit_layout.addWidget(self._find_button)
+        edit_layout.addWidget(self._reset_button)
+        edit_layout.addSpacing(8)
+        edit_layout.addWidget(self._edit_hint)
+        edit_layout.addStretch(1)
+        edit_layout.addWidget(self._save_label)
+        self._edit_bar.setVisible(False)
+
+        self._find_bar = FindBar()
+        self._find_bar.setVisible(False)
+
         # The slide the transcript below belongs to: picture, number, range.
         self._slide_header = QFrame()
         self._slide_preview = QLabel()
@@ -203,6 +247,8 @@ class LectureView(QWidget):
         right_layout.setSpacing(0)
         right_layout.addWidget(self._panel)
         right_layout.addLayout(transcript_bar)
+        right_layout.addWidget(self._edit_bar)
+        right_layout.addWidget(self._find_bar)
         right_layout.addWidget(self._slide_header)
         right_layout.addWidget(self._empty_label, 1)
         right_layout.addWidget(self._transcript, 1)
@@ -236,6 +282,25 @@ class LectureView(QWidget):
         self._panel.startRequested.connect(self.transcribeRequested)
         self._panel.cancelRequested.connect(self.cancelRequested)
         self._relocate_button.clicked.connect(self.relocateRequested)
+
+        self._transcript.textEdited.connect(self._on_text_edited)
+        self._transcript.editingFinished.connect(self._on_editing_finished)
+        self._transcript.splitRequested.connect(self._on_split_segment)
+        self._transcript.restoreRequested.connect(
+            lambda sid: self._edit(lambda st: st.restore_original(sid), sid, "Original restored")
+        )
+        self._transcript.mergeRequested.connect(
+            lambda sid: self._edit(lambda st: st.merge_with_next(sid), sid, "Segments merged",
+                                   structural=True)
+        )
+        self._transcript.insertRequested.connect(self._on_insert_segment)
+        self._transcript.deleteRequested.connect(self._on_delete_segment)
+        self._find_bar.searchChanged.connect(self._refresh_matches)
+        self._find_bar.nextRequested.connect(lambda: self._step_match(1))
+        self._find_bar.previousRequested.connect(lambda: self._step_match(-1))
+        self._find_bar.replaceRequested.connect(self._replace_current)
+        self._find_bar.replaceAllRequested.connect(self._replace_all)
+        self._find_bar.closed.connect(self._on_find_closed)
 
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._slides_pane.slideActivated.connect(self._on_slide_activated)
@@ -327,6 +392,11 @@ class LectureView(QWidget):
         self._preview_cache.clear()
         self._tabs.setVisible(False)
         self._slide_header.setVisible(False)
+        self._edit_bar.setVisible(False)
+        self._find_bar.setVisible(False)
+        self._matches, self._match_index = [], -1
+        self._save_label.setText("")
+        self._update_edit_actions()
 
     # -- transcript / slide binding ----------------------------------------
 
@@ -342,8 +412,12 @@ class LectureView(QWidget):
         appearances = self._project.slides.appearances
         return appearances[self._shown] if 0 <= self._shown < len(appearances) else None
 
-    def _rebind(self) -> None:
-        """Recompute the alignment and show whichever transcript is selected."""
+    def _rebind(self, keep_segment: str | None = None) -> None:
+        """Recompute the alignment and show whichever transcript is selected.
+
+        ``keep_segment`` is a segment the user just worked on: the view stays on
+        its slide and selects it, instead of jumping back to playback.
+        """
         assert self._project is not None
         segments = self._project.transcript.segments
         appearances = self._project.slides.appearances
@@ -358,13 +432,23 @@ class LectureView(QWidget):
             self._tabs.blockSignals(False)
         self._tabs.setVisible(both)
 
+        kept = self._project.transcript.index_of(keep_segment) if keep_segment else None
+        kept_slide = self._alignment.appearance_for(kept) if kept is not None else None
         if not appearances:
             self._shown = -1
+        elif kept_slide is not None:
+            self._shown = kept_slide
         elif self._follow_check.isChecked() or self._shown < 0:
             self._shown = self._appearance_index_at(self._player.position)
         else:
             self._shown = min(self._shown, len(appearances) - 1)
         self._show_transcript()
+        self._edit_bar.setVisible(bool(segments))
+        if keep_segment:
+            row = self._transcript.row_of(keep_segment)
+            if row >= 0:
+                self._transcript.select_row(row)
+        self._update_edit_actions()
 
     def _show_transcript(self, seconds: float | None = None) -> None:
         """Fill the transcript list for the current tab and slide.
@@ -460,6 +544,293 @@ class LectureView(QWidget):
         else:
             self._slides_pane.select_row(index)
 
+    # -- transcript editing (§13) -------------------------------------------
+
+    @property
+    def edit_actions(self) -> list[QAction]:
+        """Undo, redo, find & replace and reset, for the window's Edit menu."""
+        return [self._undo_action, self._redo_action, self._find_action, self._reset_action]
+
+    def _build_edit_actions(self) -> None:
+        self._undo_action = QAction("Undo", self)
+        self._undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self._undo_action.triggered.connect(self.undo)
+        self._redo_action = QAction("Redo", self)
+        self._redo_action.setShortcuts(
+            [QKeySequence(QKeySequence.StandardKey.Redo), QKeySequence("Ctrl+Shift+Z")]
+        )
+        self._redo_action.triggered.connect(self.redo)
+        self._find_action = QAction("Find && replace...", self)
+        self._find_action.setShortcuts(
+            [
+                QKeySequence(QKeySequence.StandardKey.Find),
+                QKeySequence(QKeySequence.StandardKey.Replace),
+            ]
+        )
+        self._find_action.triggered.connect(self.open_find)
+        self._reset_action = QAction("Reset to original transcription...", self)
+        self._reset_action.setToolTip(
+            "Discard every correction and go back to the transcript exactly as it "
+            "was transcribed. Undo brings your corrections back."
+        )
+        self._reset_action.triggered.connect(self.reset_to_original)
+
+        self._undo_button.setDefaultAction(self._undo_action)
+        self._redo_button.setDefaultAction(self._redo_action)
+        self._find_button.setDefaultAction(self._find_action)
+        self._find_button.setText("Find")
+        self._reset_button.setDefaultAction(self._reset_action)
+        self._reset_button.setText("Reset")
+        self._update_edit_actions()
+
+    def _store(self) -> TranscriptStore | None:
+        return self._project.transcript if self._project is not None else None
+
+    def _update_edit_actions(self) -> None:
+        store = self._store()
+        can_undo = bool(store and store.can_undo)
+        can_redo = bool(store and store.can_redo)
+        self._undo_action.setEnabled(can_undo)
+        self._redo_action.setEnabled(can_redo)
+        self._undo_action.setToolTip(
+            f"Undo {store.undo_label.lower()}" if can_undo and store and store.undo_label
+            else "Nothing to undo"
+        )
+        self._redo_action.setToolTip(
+            f"Redo {store.redo_label.lower()}" if can_redo and store and store.redo_label
+            else "Nothing to redo"
+        )
+        self._find_action.setEnabled(bool(store and not store.is_empty))
+        self._reset_action.setEnabled(bool(store and not store.is_empty))
+
+    def set_save_status(self, text: str, *, error: bool = False) -> None:
+        self._save_label.setText(text)
+        self._save_label.setStyleSheet("color: #C0392B;" if error else "color: #888;")
+
+    def _edit(
+        self,
+        action: Callable[[TranscriptStore], object],
+        keep_segment: str | None,
+        success: str,
+        *,
+        structural: bool = False,
+    ) -> object:
+        """Apply one edit command to the store and bring every view up to date."""
+        store = self._store()
+        if store is None:
+            return None
+        self._transcript.finish_editing()
+        try:
+            result = action(store)
+        except TranscriptEditError as exc:
+            QMessageBox.warning(self, "Cannot change the transcript", str(exc))
+            return None
+        if result is False:
+            return result
+        self._rebind(keep_segment)
+        self._refresh_matches(keep_position=True)
+        self.transcriptEdited.emit(structural)
+        self.statusMessage.emit(success)
+        return result
+
+    def _on_text_edited(self, segment_id: str, text: str) -> None:
+        """Live typing: applied at once, grouped into one undo step per segment."""
+        store = self._store()
+        if store is None:
+            return
+        try:
+            changed = store.edit_text(segment_id, text, coalesce=True)
+        except TranscriptEditError:
+            log.warning("Typing into a segment that no longer exists", exc_info=True)
+            return
+        if changed:
+            self._update_edit_actions()
+            self.transcriptEdited.emit(False)
+
+    def _on_editing_finished(self, segment_id: str) -> None:
+        store = self._store()
+        if store is None:
+            return
+        store.end_typing()
+        self._update_edit_actions()
+        self._refresh_matches(keep_position=True)
+
+    def _on_split_segment(self, segment_id: str, offset: int) -> None:
+        result = self._edit(
+            lambda st: st.split_segment(segment_id, offset), None,
+            "Segment split", structural=True,
+        )
+        if isinstance(result, tuple):
+            self._rebind(result[1].id)
+
+    def _on_insert_segment(self, segment_id: str) -> None:
+        result = self._edit(
+            lambda st: st.insert_segment_after(segment_id), None,
+            "Segment added - type what was said", structural=True,
+        )
+        if result is not None and hasattr(result, "id"):
+            self._rebind(result.id)
+            self._transcript.edit_segment(result.id)
+
+    def _on_delete_segment(self, segment_id: str) -> None:
+        store = self._store()
+        index = store.index_of(segment_id) if store else None
+        following = None
+        if store is not None and index is not None:
+            segments = store.segments
+            neighbour = index + 1 if index + 1 < len(segments) else index - 1
+            if 0 <= neighbour < len(segments):
+                following = segments[neighbour].id
+        self._edit(
+            lambda st: st.delete_segment(segment_id), following,
+            "Segment deleted - Undo brings it back", structural=True,
+        )
+
+    def undo(self) -> None:
+        self._step_history(undo=True)
+
+    def redo(self) -> None:
+        self._step_history(undo=False)
+
+    def _step_history(self, *, undo: bool) -> None:
+        store = self._store()
+        if store is None:
+            return
+        self._transcript.finish_editing()
+        selected = self._transcript.currentIndex()
+        keep = None
+        if selected.isValid():
+            segment = self._transcript.model().data(selected, Qt.ItemDataRole.UserRole + 2)
+            keep = getattr(segment, "id", None)
+        label = store.undo() if undo else store.redo()
+        if label is None:
+            return
+        self._rebind(keep)
+        self._refresh_matches(keep_position=True)
+        self.transcriptEdited.emit(True)
+        self.statusMessage.emit(f"{'Undid' if undo else 'Redid'}: {label.lower()}")
+
+    def reset_to_original(self) -> None:
+        """Go back to the transcription as Whisper produced it, after asking."""
+        project = self._project
+        if project is None or project.transcript.is_empty:
+            return
+        self._transcript.finish_editing()
+        project.transcript.end_typing()
+        if project.is_original_transcript():
+            self.statusMessage.emit("The transcript is already the original transcription.")
+            return
+
+        if project.has_original_transcript:
+            detail = (
+                "Every correction will be discarded and the transcript restored "
+                "exactly as it was transcribed - including lines you merged, "
+                "split, added or deleted."
+            )
+        else:
+            detail = (
+                "Every text correction will be discarded.\n\nThis lecture was "
+                "transcribed before the original transcription was kept, so lines "
+                "you merged, split, added or deleted stay as they are. Transcribing "
+                "again keeps the original for a full reset."
+            )
+        answer = QMessageBox.question(
+            self,
+            "Reset to the original transcription?",
+            f"{detail}\n\nYou can undo this with Ctrl+Z.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._edit(
+            lambda _store: project.reset_transcript(), None,
+            "Transcript reset to the original transcription - Undo brings your "
+            "corrections back",
+            structural=True,
+        )
+
+    # -- find & replace -------------------------------------------------------
+
+    def open_find(self) -> None:
+        store = self._store()
+        if store is None or store.is_empty:
+            return
+        self._transcript.finish_editing()
+        self._find_bar.open_bar()
+        self._refresh_matches()
+
+    def _on_find_closed(self) -> None:
+        self._matches, self._match_index = [], -1
+        self._transcript.setFocus()
+
+    def _refresh_matches(self, *, keep_position: bool = False) -> None:
+        store = self._store()
+        if store is None or not self._find_bar.isVisibleTo(self) and not self._find_bar.query:
+            self._matches, self._match_index = [], -1
+            return
+        previous = self._match_index if keep_position else -1
+        self._matches = store.find(
+            self._find_bar.query, case_sensitive=self._find_bar.case_sensitive
+        )
+        self._match_index = min(previous, len(self._matches) - 1) if previous >= 0 else -1
+        self._find_bar.set_result(len(self._matches), self._match_index)
+
+    def _step_match(self, direction: int) -> None:
+        if not self._matches:
+            self._refresh_matches()
+        if not self._matches:
+            return
+        if self._match_index < 0:
+            self._match_index = 0 if direction > 0 else len(self._matches) - 1
+        else:
+            self._match_index = (self._match_index + direction) % len(self._matches)
+        self._find_bar.set_result(len(self._matches), self._match_index)
+        self._reveal_match(self._matches[self._match_index])
+
+    def _reveal_match(self, match: TextMatch) -> None:
+        """Show the segment holding a match, switching slide if needed."""
+        slide = self._alignment.appearance_for(match.segment_index)
+        if self.showing_current_slide and slide is not None and slide != self._shown:
+            self._shown = slide
+            self._show_transcript()
+        row = self._transcript.row_of(match.segment_id)
+        if row >= 0:
+            self._transcript.select_row(row)
+
+    def _replace_current(self) -> None:
+        if not self._matches:
+            return
+        if self._match_index < 0:
+            self._step_match(1)
+            return
+        match = self._matches[self._match_index]
+        query, replacement = self._find_bar.query, self._find_bar.replacement
+        case = self._find_bar.case_sensitive
+        replaced = self._edit(
+            lambda st: st.replace_match(match, query, replacement, case_sensitive=case),
+            match.segment_id, "Replaced",
+        )
+        if replaced:
+            # Step to the next occurrence after the replaced one.
+            self._match_index -= 1
+            if self._matches:
+                self._step_match(1)
+
+    def _replace_all(self) -> None:
+        query, replacement = self._find_bar.query, self._find_bar.replacement
+        case = self._find_bar.case_sensitive
+        store = self._store()
+        if store is None or not query:
+            return
+        count = len(store.find(query, case_sensitive=case))
+        if count == 0:
+            return
+        self._edit(
+            lambda st: st.replace_everywhere(query, replacement, case_sensitive=case),
+            None, f"Replaced {count} occurrence{'s' if count != 1 else ''}",
+        )
+
     # -- transcription run state -------------------------------------------
 
     @property
@@ -503,7 +874,8 @@ class LectureView(QWidget):
         if self._project is None or self._syncing:
             return
 
-        if self._follow_check.isChecked() and self._appearance_starts:
+        editing = self._transcript.is_editing
+        if self._follow_check.isChecked() and self._appearance_starts and not editing:
             self._show_appearance(self._appearance_index_at(seconds), seconds)
         self._highlight(seconds)
 

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .alignment import Alignment, align
 from .atomic_io import read_json, write_json_atomic
-from .models import ProjectMeta, StageStatus, VideoInfo
+from .models import ProjectMeta, StageStatus, Transcript, VideoInfo
 from .slides import SlideSet
 from .transcript_store import TranscriptStore
 
@@ -24,6 +24,9 @@ log = logging.getLogger(__name__)
 
 PROJECT_FILE = "project.json"
 TRANSCRIPT_FILE = "transcript.json"
+#: Whisper's output exactly as transcription produced it, written by the
+#: transcription run and never by editing, so the whole transcript can be reset.
+ORIGINAL_TRANSCRIPT_FILE = "transcript_original.json"
 SLIDES_FILE = "slides.json"
 
 
@@ -81,6 +84,10 @@ class Project:
     @property
     def transcript_file(self) -> Path:
         return self.root / TRANSCRIPT_FILE
+
+    @property
+    def original_transcript_file(self) -> Path:
+        return self.root / ORIGINAL_TRANSCRIPT_FILE
 
     @property
     def slides_file(self) -> Path:
@@ -265,15 +272,71 @@ class Project:
             raise ProjectError(f"Could not save {TRANSCRIPT_FILE}:\n{exc}") from exc
         self.save_meta()
 
+    # -- the original transcription ------------------------------------------
+
+    def save_original_transcript(self) -> None:
+        """Keep the transcript as transcription produced it, for a full reset.
+
+        Only the transcription run calls this, at a moment when the transcript
+        holds nothing but Whisper's output. Edits and slide links are stripped
+        regardless, so the file can only ever describe the original.
+        """
+        original = Transcript.from_dict(self.transcript.transcript.to_dict())
+        for segment in original.segments:
+            segment.edited_text = None
+            segment.slide_id = None
+        try:
+            write_json_atomic(self.original_transcript_file, original.to_dict())
+        except OSError as exc:
+            raise ProjectError(
+                f"Could not save {ORIGINAL_TRANSCRIPT_FILE}:\n{exc}"
+            ) from exc
+
+    def load_original_transcript(self) -> Transcript | None:
+        """The kept original, or ``None`` when there is none or it is unreadable."""
+        path = self.original_transcript_file
+        if not path.is_file():
+            return None
+        try:
+            return Transcript.from_dict(read_json(path))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            log.warning("Ignoring an unreadable %s", ORIGINAL_TRANSCRIPT_FILE, exc_info=True)
+            return None
+
+    @property
+    def has_original_transcript(self) -> bool:
+        return self.load_original_transcript() is not None
+
+    def is_original_transcript(self) -> bool:
+        """True when there is nothing a reset would change."""
+        original = self.load_original_transcript()
+        if original is not None:
+            return self.transcript.matches(original.segments)
+        return not any(s.is_edited for s in self.transcript.segments)
+
+    def reset_transcript(self) -> bool:
+        """Go back to the original transcription, as one undoable step.
+
+        With the kept original this restores it exactly - lines merged, split,
+        added or deleted since come back as they were. A project transcribed
+        before originals were kept can only have its text edits discarded.
+        Returns False when there was nothing to reset.
+        """
+        original = self.load_original_transcript()
+        if original is not None:
+            return self.transcript.reset_to(original.segments)
+        return self.transcript.restore_all_originals() > 0
+
     # -- transcript-to-slide alignment (§10) -------------------------------
 
-    def align(self) -> Alignment:
+    def align(self, *, save: bool = True) -> Alignment:
         """Link every transcript segment to its slide, and persist the links.
 
         Called whenever the transcript or the slides change - after
         transcription, after detection, after every manual slide correction,
-        and on opening - so the links are always derived from the current
-        times rather than trusted from an earlier run.
+        after structural transcript edits, and on opening - so the links are
+        always derived from the current times rather than trusted from an
+        earlier run. ``save=False`` leaves writing the transcript to autosave.
         """
         segments = self.transcript.segments
         appearances = self.slides.appearances
@@ -284,7 +347,7 @@ class Project:
             for index in alignment.by_segment
         ]
         changed = self.transcript.set_slide_ids(slide_ids)
-        if changed:
+        if changed and save:
             try:
                 self.transcript.save()
             except OSError as exc:
