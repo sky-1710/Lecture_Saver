@@ -1089,3 +1089,236 @@ class TestResetToOriginalUI:
             assert any(name.startswith("Reset to original") for name in names)
         finally:
             window.close()
+
+
+# --------------------------------------------------------------------------
+# Export screen (Phase 6)
+# --------------------------------------------------------------------------
+
+
+class TestExportDialog:
+    def _dialog(self, project):
+        from lecture_saver.ui.export_dialog import ExportDialog
+
+        return ExportDialog(project)
+
+    def test_defaults_match_the_specification(self, qapp, project_with_slides):
+        from lecture_saver.export.options import ExportFormat
+
+        dialog = self._dialog(project_with_slides)
+        checked = [f for f, box in dialog._format_checks.items() if box.isChecked()]
+        assert checked == [ExportFormat.PDF, ExportFormat.TXT]
+        assert dialog._preset.currentText() == "Slide + Transcript"
+        assert dialog.output_dir == project_with_slides.exports_dir
+
+    def test_choosing_a_preset_sets_the_boxes_and_editing_a_box_makes_it_custom(
+        self, qapp, project_with_slides
+    ):
+        dialog = self._dialog(project_with_slides)
+        dialog._preset.setCurrentText("Slides Only")
+        assert dialog.pdf_options().transcript is False
+        assert dialog.pdf_options().slide_image is True
+
+        dialog._pdf_checks["slide_number"].setChecked(False)
+        assert dialog._preset.currentText() == "Custom"
+
+    def test_an_empty_pdf_cannot_be_exported(self, qapp, project_with_slides):
+        dialog = self._dialog(project_with_slides)
+        for box in dialog._pdf_checks.values():
+            box.setChecked(False)
+        assert not dialog._export_button.isEnabled()
+
+    def test_exporting_writes_files_reports_them_and_remembers_the_choice(
+        self, qapp, project_with_slides
+    ):
+        from lecture_saver.export.options import ExportFormat, ExportSettings
+
+        dialog = self._dialog(project_with_slides)
+        dialog._format_checks[ExportFormat.PDF].setChecked(False)
+        dialog._format_checks[ExportFormat.SRT].setChecked(True)
+        dialog._stamps_exclude.setChecked(True)
+
+        result = dialog.export_now()
+
+        assert result.ok
+        exports = project_with_slides.exports_dir
+        assert (exports / "transcript.txt").is_file()
+        assert (exports / "transcript.srt").is_file()
+        assert "transcript.srt" in dialog.result_text
+        assert str(exports) in dialog.result_text
+        assert dialog._open_folder.isVisibleTo(dialog)
+
+        remembered = ExportSettings.from_dict(
+            Project.open(project_with_slides.root).meta.export_settings
+        )
+        assert remembered.formats == [ExportFormat.TXT, ExportFormat.SRT]
+        assert remembered.include_timestamps is False
+        text = (exports / "transcript.txt").read_text(encoding="utf-8")
+        assert "[00:" not in text
+        assert "If the value is too large, the model diverges." in text
+
+    def test_a_failure_is_shown_with_its_reason(self, qapp, project_with_slides):
+        from lecture_saver.core.slides import SlideSet
+        from lecture_saver.export.options import ExportFormat
+
+        project_with_slides.set_slides(SlideSet())
+        dialog = self._dialog(project_with_slides)
+        dialog._format_checks[ExportFormat.TXT].setChecked(False)
+        dialog._preset.setCurrentText("Slides Only")
+
+        result = dialog.export_now()
+
+        assert not result.ok
+        assert "failed" in dialog.result_text
+        assert dialog._slides_note.isVisibleTo(dialog) or not project_with_slides.has_slides
+
+    def test_the_background_export_finishes(self, qapp, project_with_slides, tmp_path):
+        from PySide6.QtTest import QTest
+
+        from lecture_saver.export.options import ExportFormat
+
+        dialog = self._dialog(project_with_slides)
+        dialog.set_output_dir(tmp_path / "elsewhere")
+        dialog._format_checks[ExportFormat.PDF].setChecked(False)
+        results = []
+        dialog.exported.connect(results.append)
+
+        dialog.start_export()
+        for _ in range(100):
+            if results:
+                break
+            QTest.qWait(50)
+
+        assert results and results[0].ok
+        assert (tmp_path / "elsewhere" / "transcript.txt").is_file()
+
+
+class TestExportFromTheWindow:
+    def test_the_export_action_follows_the_project(self, qapp, tmp_path, project_with_slides):
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        try:
+            assert not window._export_action.isEnabled()
+            window._open_project_at(project_with_slides.root)
+            assert window._export_action.isEnabled()
+            assert window._export_action.shortcut().toString() == "Ctrl+Shift+E"
+            window._close_project()
+            assert not window._export_action.isEnabled()
+        finally:
+            window.close()
+
+    def test_opening_export_flushes_pending_edits_first(
+        self, qapp, tmp_path, project_with_slides, monkeypatch
+    ):
+        from lecture_saver.ui import export_dialog
+
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        try:
+            window._open_project_at(project_with_slides.root)
+            window._lecture_view._on_text_edited("segment_001", "edited just before export")
+            assert window._autosave.pending
+
+            monkeypatch.setattr(export_dialog.ExportDialog, "exec", lambda self: 0)
+            window._show_export()
+
+            assert not window._autosave.pending
+            reopened = Project.open(project_with_slides.root)
+            assert reopened.transcript.get("segment_001").effective_text == (
+                "edited just before export"
+            )
+        finally:
+            window.close()
+
+
+class TestOneClickExports:
+    @pytest.fixture
+    def window(self, qapp, tmp_path, project_with_slides, monkeypatch):
+        win = MainWindow(Settings(tmp_path / "settings.json"))
+        win._open_project_at(project_with_slides.root)
+        shown: list[tuple[object, bool]] = []
+        monkeypatch.setattr(
+            MainWindow, "_show_export_result",
+            lambda self, result, ai_request: shown.append((result, ai_request)),
+        )
+        win.shown_results = shown  # type: ignore[attr-defined]
+        yield win
+        win.close()
+
+    @staticmethod
+    def _wait(window):
+        from PySide6.QtTest import QTest
+
+        for _ in range(200):
+            if window.shown_results:
+                return window.shown_results[-1]
+            QTest.qWait(50)
+        raise AssertionError("the export never finished")
+
+    def test_the_header_offers_all_three_exports(self, qapp, project_with_slides):
+        view = LectureView()
+        view.load_project(project_with_slides)
+        seen: list[str] = []
+        view.quickExportRequested.connect(lambda: seen.append("quick"))
+        view.aiRequestRequested.connect(lambda: seen.append("ai"))
+        view.exportRequested.connect(lambda: seen.append("more"))
+        view._quick_export_button.click()
+        view._ai_request_button.click()
+        view._export_button.click()
+        assert seen == ["quick", "ai", "more"]
+
+    def test_shortcuts(self, window):
+        assert window._quick_export_action.shortcut().toString() == "Ctrl+E"
+        assert window._export_action.shortcut().toString() == "Ctrl+Shift+E"
+
+    def test_export_pdf_and_markdown_in_one_click(self, window, project_with_slides):
+        window._quick_export()
+        result, ai_request = self._wait(window)
+
+        assert ai_request is False
+        names = sorted(p.name for p in result.written)
+        assert names == ["lecture_notes.pdf", "transcript.md"] or result.failures
+        assert (project_with_slides.exports_dir / "transcript.md").is_file()
+        assert not (project_with_slides.exports_dir / "transcript.txt").exists()
+
+    def test_the_ai_request_is_written_for_an_english_lecture(self, window, project_with_slides):
+        from PySide6.QtWidgets import QMessageBox
+
+        asked: list[str] = []
+        original = QMessageBox.question
+        QMessageBox.question = lambda *a, **k: asked.append("asked")  # type: ignore[method-assign]
+        try:
+            window._ai_translation_request()
+            result, ai_request = self._wait(window)
+        finally:
+            QMessageBox.question = original  # type: ignore[method-assign]
+
+        assert asked == [], "an English lecture needs no confirmation"
+        assert ai_request is True
+        request = project_with_slides.exports_dir / "ai_translation_request.md"
+        assert request.read_text(encoding="utf-8").startswith("# AI 직역 요청")
+
+    def test_a_korean_lecture_asks_first_and_no_means_nothing_is_written(
+        self, window, project_with_slides, monkeypatch
+    ):
+        from PySide6.QtWidgets import QMessageBox
+
+        project_with_slides.transcript.transcript.language = "ko"
+        window.project.transcript.transcript.language = "ko"
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+        )
+
+        window._ai_translation_request()
+
+        assert window._export_thread is None
+        assert not (project_with_slides.exports_dir / "ai_translation_request.md").exists()
+
+    def test_without_a_transcript_it_explains_instead(self, window, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        told: list[str] = []
+        monkeypatch.setattr(
+            QMessageBox, "information", lambda *a, **k: told.append(a[1] if len(a) > 1 else "")
+        )
+        window.project.transcript.replace_all([])
+        window._ai_translation_request()
+        assert told and window._export_thread is None

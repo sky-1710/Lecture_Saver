@@ -88,6 +88,12 @@ class LectureView(QWidget):
     transcriptEdited = Signal(bool)
     #: A short message for the status bar.
     statusMessage = Signal(str)
+    #: The user wants the export screen with every format.
+    exportRequested = Signal()
+    #: One-click export of the notes PDF and Markdown.
+    quickExportRequested = Signal()
+    #: Export the lecture with a Korean translation request on top.
+    aiRequestRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -131,11 +137,31 @@ class LectureView(QWidget):
         warning_layout.addWidget(self._relocate_button)
         self._warning_bar.setVisible(False)
 
-        header = QVBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        titles.addWidget(self._title_label)
+        titles.addWidget(self._subtitle_label)
+        self._quick_export_button = QPushButton("Export PDF + MD")
+        self._quick_export_button.setToolTip(
+            "Save the lecture notes as lecture_notes.pdf and transcript.md in the "
+            "project's exports folder, with the options last used."
+        )
+        self._ai_request_button = QPushButton("AI translation request")
+        self._ai_request_button.setToolTip(
+            "Save the whole lecture as PDF and Markdown with a Korean translation "
+            "request at the top, ready to give to an AI assistant yourself.\n"
+            "Nothing is sent anywhere."
+        )
+        self._export_button = QPushButton("More formats...")
+        self._export_button.setToolTip(
+            "Choose formats and options: PDF, TXT, Markdown, SRT, VTT, JSON."
+        )
+        header = QHBoxLayout()
         header.setContentsMargins(12, 10, 12, 4)
-        header.setSpacing(2)
-        header.addWidget(self._title_label)
-        header.addWidget(self._subtitle_label)
+        header.addLayout(titles, 1)
+        header.addWidget(self._quick_export_button)
+        header.addWidget(self._ai_request_button)
+        header.addWidget(self._export_button)
 
         # --- left: slide navigator ---
         self._slides_pane = SlidePanel()
@@ -282,6 +308,9 @@ class LectureView(QWidget):
         self._panel.startRequested.connect(self.transcribeRequested)
         self._panel.cancelRequested.connect(self.cancelRequested)
         self._relocate_button.clicked.connect(self.relocateRequested)
+        self._export_button.clicked.connect(self.exportRequested)
+        self._quick_export_button.clicked.connect(self.quickExportRequested)
+        self._ai_request_button.clicked.connect(self.aiRequestRequested)
 
         self._transcript.textEdited.connect(self._on_text_edited)
         self._transcript.editingFinished.connect(self._on_editing_finished)
@@ -866,6 +895,17 @@ class LectureView(QWidget):
 
     def pause_playback(self) -> None:
         self._player.pause()
+
+    def finish_editing(self) -> None:
+        """Close an open line editor and its typing session."""
+        self._transcript.finish_editing()
+        store = self._store()
+        if store is not None:
+            store.end_typing()
+
+    def set_export_enabled(self, enabled: bool) -> None:
+        for button in (self._export_button, self._quick_export_button, self._ai_request_button):
+            button.setEnabled(enabled)
 
     # -- synchronisation (§12) ---------------------------------------------
 

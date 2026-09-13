@@ -1,4 +1,4 @@
-# Lecture Saver - runtime dependencies (Phase 1-2)
+# Lecture Saver - runtime dependencies
 #
 # Everything here runs locally. No dependency in this file talks to a cloud
 # transcription or vision service. The only network access the application ever
@@ -31,3 +31,9 @@ numpy>=1.24
 # Ships a static ffmpeg.exe inside the wheel so FFmpeg does not have to be
 # installed by hand. A system-wide ffmpeg/ffprobe is preferred when present.
 imageio-ffmpeg>=0.5.1
+
+# --- PDF export ---------------------------------------------------------------
+# Lecture notes PDF built locally with ReportLab's layout engine (no browser, no
+# service). Korean text is drawn with a TrueType font already on the machine
+# (Malgun Gothic on Windows), embedded into the PDF. Pillow reads slide images.
+reportlab>=4.2,<5

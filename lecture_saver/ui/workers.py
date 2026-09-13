@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal
 
 from ..core.models import VideoInfo
 from ..core.slides import SlideDetectionOptions
+from ..export.document import LectureDocument
+from ..export.exporter import run_export
+from ..export.options import ExportFormat, ExportSettings
 from ..media.errors import Cancelled, MediaError
 from ..media.ffmpeg_tools import probe_video
 from ..slides.pipeline import SlideDetectionPipeline, SlideUpdate
@@ -27,7 +31,14 @@ from ..transcription.whisper_engine import WhisperOptions
 
 log = logging.getLogger(__name__)
 
-__all__ = ["ProbeWorker", "TranscriptionWorker", "SlideDetectionWorker", "run_in_thread"]
+__all__ = [
+    "ExportWorker",
+    "JobWorker",
+    "ProbeWorker",
+    "SlideDetectionWorker",
+    "TranscriptionWorker",
+    "run_in_thread",
+]
 
 
 def run_in_thread(worker: QObject, thread: QThread) -> None:
@@ -146,3 +157,54 @@ class SlideDetectionWorker(QObject):
             self.failed.emit(str(exc))
             return
         self.finished.emit(slide_set)
+
+
+class ExportWorker(QObject):
+    """Writes exports on a background thread (§26).
+
+    It is given a :class:`LectureDocument` snapshot rather than the project, so
+    the user can keep editing while a long PDF is built.
+    """
+
+    progress = Signal(str, int, int)  # format label, position, total
+    finished = Signal(object)  # ExportResult
+
+    def __init__(
+        self, document: LectureDocument, settings: ExportSettings, output_dir: Path
+    ) -> None:
+        super().__init__()
+        self._document = document
+        self._settings = settings
+        self._output_dir = output_dir
+
+    def run(self) -> None:
+        def on_progress(export_format: ExportFormat, position: int, total: int) -> None:
+            self.progress.emit(export_format.label, position, total)
+
+        result = run_export(
+            self._document, self._settings, self._output_dir, on_progress=on_progress
+        )
+        self.finished.emit(result)
+
+
+class JobWorker(QObject):
+    """Runs one callable on a background thread and hands back its result.
+
+    For short jobs that report nothing along the way, such as the one-click
+    exports. The callable must not touch widgets or the live project: give it a
+    snapshot.
+    """
+
+    finished = Signal(object)
+
+    def __init__(self, job: Callable[[], object]) -> None:
+        super().__init__()
+        self._job = job
+
+    def run(self) -> None:
+        try:
+            result = self._job()
+        except Exception as exc:  # noqa: BLE001 - a worker must never crash the app
+            log.exception("Background job failed")
+            result = exc
+        self.finished.emit(result)

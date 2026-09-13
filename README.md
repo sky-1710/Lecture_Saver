@@ -8,8 +8,8 @@ cloud transcription service, no analytics, no telemetry, and no local server
 listening on a port. The only time an internet connection is needed at all is
 the first download of a Whisper model; after that the application works offline.
 
-**Current status: Phases 1–5 are implemented and working.** PDF and transcript
-export are not built yet — see
+**Current status: Phases 1–6 are implemented and working.** Duplicate-slide
+recognition and search (Phase 7) are not built yet — see
 [What works today](#what-works-today) for the exact line.
 
 ---
@@ -92,6 +92,11 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
 6. **Correct the transcript.** Double-click a line to fix it; right-click for
    merge, add, delete and restore original; Ctrl+F to find and replace a
    repeated mistake. Edits save themselves.
+7. **Export.** Top right: *Export PDF + MD* (Ctrl+E) writes the lecture notes
+   PDF - each slide with what was said on it - and the Markdown in one click.
+   *AI translation request* writes the same notes with a Korean translation
+   request on top, for you to give to an AI assistant. *More formats...*
+   (Ctrl+Shift+E) adds TXT, SRT, VTT and JSON and every option.
 
 Reopening a project restores everything.
 
@@ -215,6 +220,39 @@ to one language for the whole recording.
 - Structural edits re-link the transcript to slides at once
 - While you type, playback never switches the slide or scrolls the list away
 
+### Phase 6 — Export ✅
+
+- **Slide + transcript PDF**: the lecture title, then every slide as a block of
+  number, *Before notes / With notes* label, time range and a large picture,
+  followed by what was said while it was on screen. Speech is split into
+  paragraphs at pauses and flows across pages; slides nobody spoke over say so
+- Korean, English and mixed text from one embedded font (Malgun Gothic, or
+  Nanum Gothic). With neither installed the export stops with a clear message
+  rather than writing a PDF of empty boxes. Decomposed Hangul in file names
+  (common in archives made on a Mac) is composed before writing
+- PDF options - slide image, number, time range, transcript, per-line
+  timestamps - with the four presets: *Slide + Transcript*, *Slide +
+  Timestamped Transcript*, *Slides Only*, *Transcript Only*
+- **TXT** (`[HH:MM:SS]` blocks, or paragraphs without timestamps), **Markdown**
+  (slide headings with linked images), **SRT**, **VTT** and structured
+  **JSON** (slides with their transcript, original and edited text, schema
+  version)
+- Every export uses the corrected transcript; lines you blanked are left out
+  (JSON keeps them, with their original)
+- Built from a snapshot on a background thread, so editing can continue; each
+  format succeeds or fails on its own, and the result lists every file written
+  and the reason for any failure, with *Open folder*. Choices are remembered
+  per project
+- 22-page notes for a 27-minute lecture with 24 slides export in about 1.5 s
+- **One-click exports** in the lecture header: *Export PDF + MD* uses the PDF
+  options last chosen; *AI translation request* writes
+  `ai_translation_request.pdf` and `.md` - the whole lecture with a Korean
+  translation request at the top (translate every sentence, keep technical
+  terms in English, no summarising, an example, and how to continue a long
+  lecture). The result window can copy the request text for pasting.
+  **Nothing is sent to any AI service**; the files are for you to use. A
+  lecture transcribed as Korean asks before creating one
+
 ### Not built yet
 
 These are **visibly marked as unavailable in the UI** rather than being stubs
@@ -222,7 +260,6 @@ that look like they work:
 
 | Phase | Feature |
 |---|---|
-| 6 | Slide + transcript PDF, TXT / Markdown / SRT / VTT / JSON export |
 | 7 | Duplicate slide detection (recognising a returned-to slide), search |
 
 The data model already carries `edited_text` and `slide_id` on every segment, and
@@ -245,7 +282,7 @@ Lecture 01/
   slides/001.jpg …              representative image per slide
   cache/frame_descriptors.npz   scanned frames (thumbnails + ink masks),
                                 so re-detection skips decoding
-  exports/                      Phase 6
+  exports/                      lecture_notes.pdf, transcript.txt/.md/.srt/.vtt/.json
   logs/
 ```
 

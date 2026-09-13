@@ -30,6 +30,8 @@ from ..core.slides import (
     split_at,
 )
 from ..core.timecode import format_hms
+from ..export.document import LectureDocument, build_document
+from ..export.options import ExportFormat, ExportSettings
 from ..media.errors import FFmpegNotFoundError, MediaError
 from ..media.ffmpeg_tools import VIDEO_FILE_FILTER, find_ffmpeg, find_ffprobe
 from ..slides.pipeline import capture_slide_image
@@ -37,7 +39,13 @@ from ..transcription.whisper_engine import WhisperOptions
 from .autosave import Autosave
 from .lecture_view import LectureView
 from .start_view import StartView
-from .workers import ProbeWorker, SlideDetectionWorker, TranscriptionWorker, run_in_thread
+from .workers import (
+    JobWorker,
+    ProbeWorker,
+    SlideDetectionWorker,
+    TranscriptionWorker,
+    run_in_thread,
+)
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +64,8 @@ class MainWindow(QMainWindow):
         self._transcribe_worker: TranscriptionWorker | None = None
         self._slides_thread: QThread | None = None
         self._slides_worker: SlideDetectionWorker | None = None
+        self._export_thread: QThread | None = None
+        self._export_worker: JobWorker | None = None
 
         self.setWindowTitle("Lecture Saver")
         self.setMinimumSize(820, 560)
@@ -102,6 +112,19 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._reveal_action)
 
         file_menu.addSeparator()
+        self._quick_export_action = QAction("&Export PDF + Markdown", self)
+        self._quick_export_action.setShortcut(QKeySequence("Ctrl+E"))
+        self._quick_export_action.setEnabled(False)
+        file_menu.addAction(self._quick_export_action)
+        self._ai_request_action = QAction("Create &AI translation request", self)
+        self._ai_request_action.setEnabled(False)
+        file_menu.addAction(self._ai_request_action)
+        self._export_action = QAction("More export &formats...", self)
+        self._export_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        self._export_action.setEnabled(False)
+        file_menu.addAction(self._export_action)
+
+        file_menu.addSeparator()
         quit_action = QAction("E&xit", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
@@ -140,6 +163,9 @@ class MainWindow(QMainWindow):
         self._open_action.triggered.connect(self._choose_project)
         self._close_action.triggered.connect(self._close_project)
         self._reveal_action.triggered.connect(self._reveal_project)
+        self._export_action.triggered.connect(self._show_export)
+        self._quick_export_action.triggered.connect(self._quick_export)
+        self._ai_request_action.triggered.connect(self._ai_translation_request)
 
         self._start_view.newProjectRequested.connect(self._choose_video)
         self._start_view.openProjectRequested.connect(self._choose_project)
@@ -157,6 +183,9 @@ class MainWindow(QMainWindow):
         self._lecture_view.slideSplitRequested.connect(self._split_slide)
         self._lecture_view.slideMoveBoundaryRequested.connect(self._move_slide_boundary)
         self._lecture_view.transcriptEdited.connect(self._on_transcript_edited)
+        self._lecture_view.exportRequested.connect(self._show_export)
+        self._lecture_view.quickExportRequested.connect(self._quick_export)
+        self._lecture_view.aiRequestRequested.connect(self._ai_translation_request)
         self._lecture_view.statusMessage.connect(
             lambda message: self.statusBar().showMessage(message, 5000)
         )
@@ -277,6 +306,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{project.name} - Lecture Saver")
         self._close_action.setEnabled(True)
         self._reveal_action.setEnabled(True)
+        self._export_action.setEnabled(True)
+        self._quick_export_action.setEnabled(True)
+        self._ai_request_action.setEnabled(True)
         self._debug_action.setEnabled(True)
 
         if project.video_missing:
@@ -290,6 +322,7 @@ class MainWindow(QMainWindow):
     def _close_project(self) -> None:
         if not self._confirm_stop_transcription():
             return
+        self._wait_for_export()
         self._flush_edits()
         if self.project is not None:
             try:
@@ -302,6 +335,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Lecture Saver")
         self._close_action.setEnabled(False)
         self._reveal_action.setEnabled(False)
+        self._export_action.setEnabled(False)
+        self._quick_export_action.setEnabled(False)
+        self._ai_request_action.setEnabled(False)
         self._debug_action.setEnabled(False)
         self._refresh_recent()
 
@@ -653,6 +689,151 @@ class MainWindow(QMainWindow):
         if self._autosave.pending or (self.project and self.project.transcript.is_dirty):
             self._autosave.flush()
 
+    # -- export (§19-§23) -----------------------------------------------------
+
+    def _show_export(self) -> None:
+        if self.project is None or self._busy:
+            return
+        # Export what the user sees: the line being typed is part of it.
+        self._lecture_view.finish_editing()
+        self._flush_edits()
+        from .export_dialog import ExportDialog
+
+        dialog = ExportDialog(self.project, self)
+        dialog.exported.connect(self._on_exported)
+        dialog.exec()
+
+    def _export_snapshot(self) -> tuple[LectureDocument, ExportSettings, Path] | None:
+        """Everything a background export needs, taken on the UI thread."""
+        if self.project is None or self._busy or self._export_thread is not None:
+            return None
+        self._lecture_view.finish_editing()
+        self._flush_edits()
+        settings = ExportSettings.from_dict(self.project.meta.export_settings)
+        output = Path(settings.output_dir) if settings.output_dir else self.project.exports_dir
+        return build_document(self.project), settings, output
+
+    def _quick_export(self) -> None:
+        """One click: the notes PDF and the Markdown, with the last-used options."""
+        snapshot = self._export_snapshot()
+        if snapshot is None:
+            return
+        from ..export.exporter import run_export
+
+        document, settings, output = snapshot
+        settings.formats = [ExportFormat.PDF, ExportFormat.MARKDOWN]
+        self._run_export_job(lambda: run_export(document, settings, output), ai_request=False)
+
+    def _ai_translation_request(self) -> None:
+        """Export the lecture with a Korean translation request at the top."""
+        if self.project is None:
+            return
+        if self.project.transcript.is_empty:
+            QMessageBox.information(
+                self, "No transcript yet",
+                "Transcribe the lecture first - the request asks for the transcript "
+                "to be translated.",
+            )
+            return
+        if self.project.transcript.language == "ko":
+            answer = QMessageBox.question(
+                self,
+                "This lecture is in Korean",
+                "This lecture was transcribed as Korean. The translation request is "
+                "meant for English lectures, so an assistant would have nothing to "
+                "translate.\n\nCreate the request anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        snapshot = self._export_snapshot()
+        if snapshot is None:
+            return
+        from ..export.ai_request import run_ai_request_export
+
+        document, settings, output = snapshot
+        self._run_export_job(
+            lambda: run_ai_request_export(document, settings.pdf, output), ai_request=True
+        )
+
+    def _run_export_job(self, job: Callable[[], object], *, ai_request: bool) -> None:
+        self._lecture_view.set_export_enabled(False)
+        self.statusBar().showMessage("Exporting...")
+        self._export_thread = QThread(self)
+        self._export_worker = JobWorker(job)
+        self._export_worker.finished.connect(
+            lambda result: self._on_export_job_finished(result, ai_request)
+        )
+        run_in_thread(self._export_worker, self._export_thread)
+
+    def _wait_for_export(self) -> None:
+        """Let a running export finish writing before the project goes away."""
+        if self._export_thread is not None:
+            self._export_thread.quit()
+            self._export_thread.wait(60000)
+
+    def _on_export_job_finished(self, result: object, ai_request: bool) -> None:
+        if self._export_thread is not None:
+            self._export_thread.quit()
+            self._export_thread.wait(15000)
+        self._export_thread = None
+        self._export_worker = None
+        self._lecture_view.set_export_enabled(True)
+        if isinstance(result, Exception):
+            QMessageBox.critical(self, "Export failed", f"The export failed:\n{result}")
+            return
+        self._on_exported(result)
+        self._show_export_result(result, ai_request=ai_request)
+
+    def _show_export_result(self, result: object, *, ai_request: bool) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        written = list(getattr(result, "written", []))
+        failures = list(getattr(result, "failures", []))
+        output = getattr(result, "output_dir", "")
+        lines = []
+        if written:
+            lines.append(f"Saved to {output}:")
+            lines += [f"  • {Path(path).name}" for path in written]
+        for export_format, message in failures:
+            lines.append(f"\n{getattr(export_format, 'label', export_format)} failed:\n{message}")
+        if ai_request and written:
+            lines.append(
+                "\nGive the Markdown (or PDF) to an AI assistant. The request is at the "
+                "top of the file. Nothing has been sent anywhere."
+            )
+
+        box = QMessageBox(self)
+        box.setWindowTitle("AI translation request" if ai_request else "Export")
+        box.setIcon(QMessageBox.Icon.Information if not failures else QMessageBox.Icon.Warning)
+        box.setText("\n".join(lines) or "Nothing was exported.")
+        open_button = box.addButton("Open folder", QMessageBox.ButtonRole.ActionRole)
+        copy_button = None
+        markdown = next((Path(p) for p in written if Path(p).suffix == ".md"), None)
+        if ai_request and markdown is not None:
+            copy_button = box.addButton("Copy request text", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is open_button and written:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(output)))
+        elif copy_button is not None and clicked is copy_button and markdown is not None:
+            QApplication.clipboard().setText(markdown.read_text(encoding="utf-8"))
+            self.statusBar().showMessage("Request copied - paste it into the AI assistant", 8000)
+
+    def _on_exported(self, result: object) -> None:
+        written = getattr(result, "written", [])
+        failures = getattr(result, "failures", [])
+        if written and not failures:
+            self.statusBar().showMessage(
+                f"Exported {len(written)} file{'s' if len(written) != 1 else ''} to "
+                f"{getattr(result, 'output_dir', '')}", 10000,
+            )
+        elif failures:
+            self.statusBar().showMessage("Some exports failed - see the export window", 10000)
+
     def _on_autosave_failed(self, message: str) -> None:
         self._lecture_view.set_save_status("Not saved", error=True)
         self.statusBar().showMessage(message, 15000)
@@ -668,6 +849,10 @@ class MainWindow(QMainWindow):
         self._new_action.setEnabled(enabled)
         self._open_action.setEnabled(enabled)
         self._close_action.setEnabled(enabled)
+        has_project = enabled and self.project is not None
+        for action in (self._export_action, self._quick_export_action, self._ai_request_action):
+            action.setEnabled(has_project)
+        self._lecture_view.set_export_enabled(enabled)
 
     # -- help ---------------------------------------------------------------
 
@@ -723,8 +908,7 @@ class MainWindow(QMainWindow):
             "connection is needed is the first download of a Whisper model.</p>"
             "<p>Currently implemented: project management, video playback, "
             "local transcription, slide detection, transcript-to-slide "
-            "alignment and transcript editing (Phases 1-5). Export is not "
-            "built yet.</p>",
+            "alignment, transcript editing and export (Phases 1-6).</p>",
         )
 
     # -- window state -------------------------------------------------------
@@ -745,6 +929,7 @@ class MainWindow(QMainWindow):
         rect = self.geometry()
         self.settings.set("window_geometry", [rect.x(), rect.y(), rect.width(), rect.height()])
 
+        self._wait_for_export()
         self._flush_edits()
         if self.project is not None:
             try:
