@@ -32,6 +32,7 @@ from .descriptors import (
     source_key_for,
 )
 from .detector import detect_appearances
+from .duplicates import link_returned_slides
 
 log = logging.getLogger(__name__)
 
@@ -188,6 +189,7 @@ class SlideDetectionPipeline:
             ink=descriptors,
         )
         result = add_annotation_snapshots(result, descriptors, self.options)
+        result = link_returned_slides(result, descriptors, self.options)
         self.last_result = result
         if result.busy.masked_cells:
             log.info(
@@ -204,8 +206,13 @@ class SlideDetectionPipeline:
         total = len(result.appearances)
         self._emit(STAGE_CAPTURE, 0.0, f"Capturing {total} slide images...")
 
+        captured: set[int] = set()
         for position, appearance in enumerate(result.appearances):
             self._check_cancel()
+            if appearance.slide_id in captured:
+                # A return to a slide already captured shares its picture.
+                continue
+            captured.add(appearance.slide_id)
 
             name = f"{appearance.slide_id:03d}.jpg"
             target = self.project.slides_dir / name

@@ -35,7 +35,8 @@ def options(**overrides) -> SlideDetectionOptions:
             setattr(getattr(built, group), field_name, value)
         else:  # a bare name: find whichever group owns it
             for name in ("sampling", "normal_transition", "strong_global_transition",
-                         "annotation_filter", "annotation_snapshots", "busy_region_mask",
+                         "annotation_filter", "annotation_snapshots", "duplicate_slides",
+                         "busy_region_mask",
                          "timing", "image"):
                 target = getattr(built, name)
                 if hasattr(target, key):

@@ -36,6 +36,8 @@ from ..slides.descriptors import FrameDescriptors, source_key_for
 from ..slides.detector import compute_noise_mask, detect_appearances
 from ..slides.diagnostics import Candidate, Outcome
 from ..slides.ink_analysis import compare_ink
+from . import theme
+from .theme import Role, set_role
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +82,7 @@ class SlideDebugDialog(QDialog):
         self._summary = QPlainTextEdit()
         self._summary.setReadOnly(True)
         self._summary.setMaximumHeight(190)
-        self._summary.setStyleSheet("font-family: Consolas, monospace;")
+        set_role(self._summary, Role.MONO)
 
         self._picker = QComboBox()
         self._picker.setMinimumWidth(420)
@@ -114,18 +116,21 @@ class SlideDebugDialog(QDialog):
         ):
             caption = QLabel(title)
             caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            caption.setStyleSheet("font-weight: 600;")
+            set_role(caption, Role.SECTION)
             view = QLabel()
             view.setAlignment(Qt.AlignmentFlag.AlignCenter)
             view.setMinimumHeight(180)
-            view.setStyleSheet("background: #202024; border: 1px solid #3a3a40;")
+            view.setStyleSheet(
+                f"background: {theme.VIDEO_BACKDROP}; border: 1px solid #33343A; "
+                f"border-radius: {theme.RADIUS_SMALL}px;"
+            )
             grid.addWidget(caption, 0, column)
             grid.addWidget(view, 1, column)
             self._images[key] = view
 
         self._detail = QPlainTextEdit()
         self._detail.setReadOnly(True)
-        self._detail.setStyleSheet("font-family: Consolas, monospace;")
+        set_role(self._detail, Role.MONO)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._summary)

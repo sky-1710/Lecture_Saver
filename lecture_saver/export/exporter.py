@@ -21,7 +21,7 @@ from .text_formats import to_json, to_markdown, to_srt, to_txt, to_vtt
 
 log = logging.getLogger(__name__)
 
-__all__ = ["ExportResult", "run_export"]
+__all__ = ["ExportResult", "ProgressCallback", "run_export"]
 
 ProgressCallback = Callable[[ExportFormat, int, int], None]
 

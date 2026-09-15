@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from lecture_saver.core.alignment import align, assign_segments
+from lecture_saver.core.alignment import align, assign_segments, snapped_starts
 from lecture_saver.core.models import TranscriptSegment
 from lecture_saver.core.slides import SlideAppearance
 
@@ -120,3 +120,65 @@ def test_the_result_is_deterministic(start, end):
     assert assign_segments([seg(start, end)], appearances) == assign_segments(
         [seg(start, end)], appearances
     )
+
+
+def spoken(start, end, text, index=1):
+    return TranscriptSegment(
+        id=f"segment_{index:03d}", start=start, end=end, original_text=text
+    )
+
+
+class TestBoundariesFollowTheSentences:
+    """A slide changes mid-sentence; the speech must not be cut in half (§10)."""
+
+    #: "The lecturer keeps going / and finishes the idea." is one sentence over
+    #: two lines, and the slide changes 4 s before that sentence ends.
+    SEGMENTS = [
+        spoken(0.0, 10.0, "First thought here.", 1),
+        spoken(10.0, 20.0, "The lecturer keeps going", 2),
+        spoken(20.0, 30.0, "and finishes the idea.", 3),
+        spoken(30.0, 40.0, "A new thought begins.", 4),
+    ]
+
+    def test_a_sentence_running_over_the_change_stays_on_one_slide(self):
+        assert assign_segments(self.SEGMENTS, slides(0, 24, 40)) == [0, 0, 0, 1]
+
+    def test_without_snapping_it_is_split_down_the_middle(self):
+        assert assign_segments(self.SEGMENTS, slides(0, 24, 40), snap=0) == [0, 0, 1, 1]
+
+    def test_the_boundary_only_moves_as_far_as_a_real_break(self):
+        starts = snapped_starts(self.SEGMENTS, slides(0, 24, 40))
+        assert starts == [0.0, 30.0]
+
+    def test_a_change_far_from_any_sentence_end_is_left_where_it_is(self):
+        # Sentences end at 10 s and 30 s; a change at 17 s is out of reach of
+        # both, so it stays where the detector put it.
+        starts = snapped_starts(self.SEGMENTS, slides(0, 17, 40))
+        assert starts == [0.0, 17.0]
+
+    def test_a_change_inside_a_sentence_moves_back_to_where_it_began(self):
+        # 15 s is inside the sentence that starts at 10 s: the whole sentence
+        # belongs to the slide that was up while it was said.
+        assert snapped_starts(self.SEGMENTS, slides(0, 15, 40)) == [0.0, 10.0]
+
+    def test_a_short_slide_cannot_be_emptied_by_the_snap(self):
+        # A two-second appearance: the boundary may move at most one second,
+        # so the speech said over it stays with it.
+        appearances = slides(0, 28, 30, 40)
+        starts = snapped_starts(self.SEGMENTS, appearances)
+        assert starts[1] == 28.0
+        assert 28.0 in [a.start for a in appearances]
+
+    def test_snapped_starts_stay_in_order(self):
+        segments = [
+            spoken(0.0, 5.0, "One.", 1),
+            spoken(5.0, 10.0, "Two.", 2),
+            spoken(10.0, 15.0, "Three.", 3),
+            spoken(15.0, 20.0, "Four.", 4),
+        ]
+        starts = snapped_starts(segments, slides(0, 6, 9, 12, 20))
+        assert starts == sorted(starts)
+
+    def test_speech_is_never_left_unassigned(self):
+        assignment = assign_segments(self.SEGMENTS, slides(0, 24, 40))
+        assert all(index is not None for index in assignment)

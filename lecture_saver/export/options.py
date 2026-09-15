@@ -62,6 +62,8 @@ class PdfOptions:
     time_range: bool = True
     transcript: bool = True
     segment_timestamps: bool = False
+    #: The imported translation under each slide's transcript, when there is one.
+    translation: bool = True
 
     @property
     def shows_slides(self) -> bool:
@@ -69,13 +71,13 @@ class PdfOptions:
 
     @property
     def is_empty(self) -> bool:
-        return not (self.shows_slides or self.transcript)
+        return not (self.shows_slides or self.transcript or self.translation)
 
 
 PDF_PRESETS: dict[str, PdfOptions] = {
     "Slide + Transcript": PdfOptions(),
     "Slide + Timestamped Transcript": PdfOptions(segment_timestamps=True),
-    "Slides Only": PdfOptions(transcript=False),
+    "Slides Only": PdfOptions(transcript=False, translation=False),
     "Transcript Only": PdfOptions(slide_image=False, slide_number=False, time_range=False),
 }
 

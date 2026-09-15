@@ -355,3 +355,51 @@ class TestPersistence:
             "learning rate If this value is too large, the model can diverge."
         )
         assert "러닝레이트" in segment.original_text
+
+
+class TestSplitAtSlideChanges:
+    """Cutting lines that a slide change runs through (§10, §13)."""
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        return make_store(
+            tmp_path,
+            (0.0, 10.0, "First thought here. And the second one begins"),
+            (10.0, 20.0, "and ends here. A third follows it"),
+        )
+
+    def test_a_line_is_cut_at_the_sentence_end_nearest_the_change(self, store):
+        assert store.split_at_slide_changes([5.0]) == 1
+
+        texts = [s.effective_text for s in store.segments]
+        assert texts[0] == "First thought here."
+        assert texts[1] == "And the second one begins"
+
+    def test_every_cut_is_one_undo(self, store):
+        store.split_at_slide_changes([5.0, 14.0])
+        assert len(store.segments) == 4
+
+        store.undo()
+        assert len(store.segments) == 2
+        assert store.segments[0].effective_text.startswith("First thought here.")
+
+    def test_a_change_that_already_falls_between_sentences_changes_nothing(self, store):
+        assert store.split_at_slide_changes([10.0]) == 0
+        assert len(store.segments) == 2
+        assert not store.can_undo
+
+    def test_the_original_transcription_is_kept_on_both_halves(self, store):
+        store.split_at_slide_changes([5.0])
+
+        assert store.segments[0].original_text == "First thought here."
+        assert store.segments[0].edited_text is None
+        assert store.segments[1].original_text == "And the second one begins"
+
+    def test_times_are_divided_in_proportion_to_the_text(self, store):
+        store.split_at_slide_changes([5.0])
+
+        first, second = store.segments[0], store.segments[1]
+        assert first.start == 0.0
+        assert 3.0 < first.end < 6.0
+        assert second.start == first.end
+        assert second.end == 10.0

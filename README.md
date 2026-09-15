@@ -8,8 +8,8 @@ cloud transcription service, no analytics, no telemetry, and no local server
 listening on a port. The only time an internet connection is needed at all is
 the first download of a Whisper model; after that the application works offline.
 
-**Current status: Phases 1–6 are implemented and working.** Duplicate-slide
-recognition and search (Phase 7) are not built yet — see
+**Current status: Phases 1–7 are implemented and working**, apart from the
+slide-region detection improvement listed under *Not built yet* — see
 [What works today](#what-works-today) for the exact line.
 
 ---
@@ -29,6 +29,15 @@ py -3.11 -m venv .venv
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+To open it like any other app, add a Desktop and Start-menu shortcut once:
+
+```powershell
+python run.py --create-shortcuts     # "Lecture Saver" with its icon, no console window
+python run.py --remove-shortcuts     # take them away again
+```
+
+The shortcut runs this folder's code directly, so later updates need no rebuild.
 
 Then check the environment before launching anything:
 
@@ -79,13 +88,18 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
 2. **Name the lecture.** A project folder is created under
    `Documents\Lecture Saver\Projects\`.
 3. **Transcribe.** Pick a model and language on the right, then
-   *Transcribe lecture*. Progress, the current stage and a **Cancel** button are
-   shown throughout; the window stays responsive because the work runs on a
-   background thread.
+   *Transcribe lecture*. A percentage, the current stage and a **Cancel** button
+   are shown throughout - beside the panel's progress bar, in the status bar, and
+   in the window title, so the figure is readable even when the window is
+   minimised. The window stays responsive because the work runs on a background
+   thread; exports report the same way, one line per file being written.
 4. **Detect slides.** Press *Detect slides* in the left pane. The video is
    scanned at about 100x realtime, each detected slide is saved as a JPEG, and
    the navigator fills with thumbnails. Correct any mistakes by right-clicking
    a slide, or with *Add slide here*.
+   Lines that a slide change runs through are cut at the nearest full stop, so
+   each slide keeps whole sentences; **Edit → Split lines at slide changes**
+   repeats that at any time, and Ctrl+Z undoes it.
 5. **Navigate.** Click any transcript segment or slide thumbnail to jump the
    video there. As the video plays, the matching transcript segment is
    highlighted and scrolled into view.
@@ -97,6 +111,11 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    *AI translation request* writes the same notes with a Korean translation
    request on top, for you to give to an AI assistant. *More formats...*
    (Ctrl+Shift+E) adds TXT, SRT, VTT and JSON and every option.
+8. **Bring the translation back.** Paste the assistant's answer into *Import
+   translation*; each slide's translation appears under its transcript and in
+   the PDF and Markdown.
+9. **Search** (Ctrl+Shift+F, or the *Search* tab) to find where anything was
+   said; click a result to jump to that slide and moment.
 
 Reopening a project restores everything.
 
@@ -137,6 +156,9 @@ to one language for the whole recording.
 ### Phase 2 — Local transcription ✅
 
 - Audio extraction to 16 kHz mono WAV with real progress
+- Word-level timestamps, so each transcript line ends where a sentence does
+  rather than where Whisper's decoder stopped (about 12% slower; it is what
+  makes slide boundaries land between sentences)
 - Local transcription with **faster-whisper** (CTranslate2), CPU int8
 - Korean, English, Japanese, Chinese, or auto-detect
 - Segment-level timestamps
@@ -246,26 +268,53 @@ to one language for the whole recording.
 - 22-page notes for a 27-minute lecture with 24 slides export in about 1.5 s
 - **One-click exports** in the lecture header: *Export PDF + MD* uses the PDF
   options last chosen; *AI translation request* writes
-  `ai_translation_request.pdf` and `.md` - the whole lecture with a Korean
+  `<lecture name>_ai_translation.pdf` and `.md` - the whole lecture with a Korean
   translation request at the top (translate every sentence, keep technical
   terms in English, no summarising, an example, and how to continue a long
   lecture). The result window can copy the request text for pasting.
   **Nothing is sent to any AI service**; the files are for you to use. A
   lecture transcribed as Korean asks before creating one
 
+### Translation import ✅
+
+- *Import translation* reads an AI assistant's answer to the translation
+  request - pasted, or loaded from a `.md`/`.txt` file - and attaches each
+  `## Slide N` section to that slide. It previews which slides match, which
+  numbers are not in the lecture and which slides are still untranslated
+- The example inside the request and assistants' notes ("type '계속' to
+  continue") are ignored; an answer in several parts can be imported part by
+  part
+- Stored in `translations.json` against each slide's number *and* time, so
+  after slides are corrected or detected again a translation is only shown for
+  a slide that still covers the same part of the lecture - never under a
+  different slide
+- Shown under the transcript on the *Current slide* tab, included in the PDF and
+  Markdown as a *한국어 직역* block under each slide's transcript and in JSON,
+  optional in *More formats...*, and searchable. Nothing is sent anywhere
+
+### Phase 7 — Search, returned slides, recovery ✅
+
+- **Search** tab (Ctrl+Shift+F): every word in any order, case and **spacing
+  ignored** ("러닝 레이트" finds "러닝레이트"), in the corrected text, the
+  original transcription and imported translations. Results show the slide
+  number, time and the matching words highlighted; clicking one selects the
+  slide, seeks the video and selects the line
+- **Returned slides** (5 → 6 → 7 → 6): the second visit is recognised as the
+  same slide - it shares the slide's identity and picture, shows *Same as
+  Slide 6*, and the PDF refers back instead of repeating the picture while
+  keeping that visit's speech. Measured on a real lecture, both genuine returns
+  were found and nothing else was merged. Right-click → *Treat as a different
+  slide* undoes a wrong match. `duplicate_slides` in `project.json` tunes it
+- **Continue an unfinished transcription**: after a cancel, a failure or a
+  crash, *Continue from HH:MM:SS* transcribes only the rest of the audio,
+  keeping what was done and any corrections made to it
+
 ### Not built yet
 
-These are **visibly marked as unavailable in the UI** rather than being stubs
-that look like they work:
-
-| Phase | Feature |
+| Feature | Notes |
 |---|---|
-| 7 | Duplicate slide detection (recognising a returned-to slide), search |
-
-The data model already carries `edited_text` and `slide_id` on every segment, and
-`slides.json` already separates a *slide* from its *appearances* and stores a
-perceptual fingerprint per slide, so Phase 7 can recognise a returned-to slide
-without a migration. Nothing compares fingerprints yet.
+| Better slide-region detection | Comparing only the area of the frame that holds the slide (e.g. ignoring a large camera view beside it). The busy-region mask covers webcams and embedded video today |
+| Original PPT/PDF matching (§24) | Using the professor's own deck instead of video captures |
 
 ---
 
@@ -275,6 +324,7 @@ without a migration. Nothing compares fingerprints yet.
 Lecture 01/
   project.json                  video reference, metadata, stage states, settings
   transcript.json               the authoritative transcript
+  translations.json             imported slide translations
   transcript_original.json      Whisper's output as transcribed, kept for
                                 "Reset to original"; never touched by editing
   slides.json                   detected slides and their appearance intervals

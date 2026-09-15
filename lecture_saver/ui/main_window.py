@@ -6,13 +6,22 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QUrl
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
+from PySide6.QtCore import QRect, Qt, QThread, QUrl
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QDesktopServices,
+    QGuiApplication,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QStackedWidget,
 )
 
@@ -26,6 +35,7 @@ from ..core.slides import (
     delete_appearance,
     merge_with_previous,
     move_boundary,
+    separate_slide,
     set_slide_image,
     split_at,
 )
@@ -39,6 +49,7 @@ from ..transcription.whisper_engine import WhisperOptions
 from .autosave import Autosave
 from .lecture_view import LectureView
 from .start_view import StartView
+from .theme import Role, set_role
 from .workers import (
     JobWorker,
     ProbeWorker,
@@ -66,6 +77,9 @@ class MainWindow(QMainWindow):
         self._slides_worker: SlideDetectionWorker | None = None
         self._export_thread: QThread | None = None
         self._export_worker: JobWorker | None = None
+        #: Whether the export in flight is the AI translation request. Kept here
+        #: rather than captured in a lambda - see _run_export_job.
+        self._export_is_ai_request = False
 
         self.setWindowTitle("Lecture Saver")
         self.setMinimumSize(820, 560)
@@ -82,12 +96,54 @@ class MainWindow(QMainWindow):
         self._autosave = Autosave(self._save_transcript, parent=self)
 
         self._build_menus()
+        self._build_status_bar()
         self._connect()
         self._restore_geometry()
         self._refresh_recent()
         self.statusBar().showMessage("Ready")
 
     # -- construction -------------------------------------------------------
+
+    def _build_status_bar(self) -> None:
+        """A percentage and a bar that any long job can drive (§27)."""
+        self._status_percent = QLabel("")
+        set_role(self._status_percent, Role.SECTION)
+        self._status_percent.setMinimumWidth(38)
+        self._status_bar_progress = QProgressBar()
+        self._status_bar_progress.setFixedWidth(140)
+        self._status_bar_progress.setTextVisible(False)
+        self.statusBar().addPermanentWidget(self._status_percent)
+        self.statusBar().addPermanentWidget(self._status_bar_progress)
+        self._show_status_progress(False)
+
+    def _show_status_progress(self, visible: bool) -> None:
+        self._status_percent.setVisible(visible)
+        self._status_bar_progress.setVisible(visible)
+        if not visible:
+            self._status_percent.setText("")
+            self._set_title_progress(None)
+
+    def _set_status_progress(self, stage: str, fraction: float) -> None:
+        """Drive the status-bar bar, its percentage, and the window title."""
+        self._show_status_progress(True)
+        if fraction < 0:
+            self._status_bar_progress.setRange(0, 0)
+            self._status_percent.setText("...")
+            self._set_title_progress(None)
+        else:
+            percent = max(0, min(100, int(fraction * 100)))
+            self._status_bar_progress.setRange(0, 100)
+            self._status_bar_progress.setValue(percent)
+            self._status_percent.setText(f"{percent}%")
+            self._set_title_progress(percent)
+        if stage:
+            self.statusBar().showMessage(stage)
+
+    def _set_title_progress(self, percent: int | None) -> None:
+        """Put the percentage in the title, so it is readable when minimised."""
+        name = self.project.name if self.project is not None else None
+        base = f"{name} - Lecture Saver" if name else "Lecture Saver"
+        self.setWindowTitle(f"{percent}% - {base}" if percent is not None else base)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -119,6 +175,9 @@ class MainWindow(QMainWindow):
         self._ai_request_action = QAction("Create &AI translation request", self)
         self._ai_request_action.setEnabled(False)
         file_menu.addAction(self._ai_request_action)
+        self._import_translation_action = QAction("&Import translation...", self)
+        self._import_translation_action.setEnabled(False)
+        file_menu.addAction(self._import_translation_action)
         self._export_action = QAction("More export &formats...", self)
         self._export_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
         self._export_action.setEnabled(False)
@@ -166,6 +225,7 @@ class MainWindow(QMainWindow):
         self._export_action.triggered.connect(self._show_export)
         self._quick_export_action.triggered.connect(self._quick_export)
         self._ai_request_action.triggered.connect(self._ai_translation_request)
+        self._import_translation_action.triggered.connect(self._import_translation)
 
         self._start_view.newProjectRequested.connect(self._choose_video)
         self._start_view.openProjectRequested.connect(self._choose_project)
@@ -173,6 +233,9 @@ class MainWindow(QMainWindow):
         self._start_view.recentSelected.connect(self._open_project_at)
 
         self._lecture_view.transcribeRequested.connect(self._start_transcription)
+        self._lecture_view.resumeTranscriptionRequested.connect(
+            lambda options: self._start_transcription(options, resume=True)
+        )
         self._lecture_view.cancelRequested.connect(self._cancel_transcription)
         self._lecture_view.relocateRequested.connect(self._relocate_video)
         self._lecture_view.detectSlidesRequested.connect(self._start_slide_detection)
@@ -182,10 +245,12 @@ class MainWindow(QMainWindow):
         self._lecture_view.slideRecaptureRequested.connect(self._recapture_slide)
         self._lecture_view.slideSplitRequested.connect(self._split_slide)
         self._lecture_view.slideMoveBoundaryRequested.connect(self._move_slide_boundary)
+        self._lecture_view.slideSeparateRequested.connect(self._separate_slide)
         self._lecture_view.transcriptEdited.connect(self._on_transcript_edited)
         self._lecture_view.exportRequested.connect(self._show_export)
         self._lecture_view.quickExportRequested.connect(self._quick_export)
         self._lecture_view.aiRequestRequested.connect(self._ai_translation_request)
+        self._lecture_view.importTranslationRequested.connect(self._import_translation)
         self._lecture_view.statusMessage.connect(
             lambda message: self.statusBar().showMessage(message, 5000)
         )
@@ -216,7 +281,11 @@ class MainWindow(QMainWindow):
             return
 
         self.statusBar().showMessage(f"Reading {video_path.name}...")
-        self.setEnabled(False)
+        # Only the actions that would start a second job are held back. The
+        # window itself stays usable: a worker that never reports back must not
+        # be able to leave the whole application dead to the mouse.
+        self._set_project_actions_enabled(False)
+        self._start_view.setEnabled(False)
 
         self._probe_thread = QThread(self)
         self._probe_worker = ProbeWorker(video_path)
@@ -225,7 +294,8 @@ class MainWindow(QMainWindow):
         run_in_thread(self._probe_worker, self._probe_thread)
 
     def _finish_probe(self) -> None:
-        self.setEnabled(True)
+        self._start_view.setEnabled(True)
+        self._set_project_actions_enabled(True)
         if self._probe_thread is not None:
             self._probe_thread.quit()
             self._probe_thread.wait(5000)
@@ -309,6 +379,7 @@ class MainWindow(QMainWindow):
         self._export_action.setEnabled(True)
         self._quick_export_action.setEnabled(True)
         self._ai_request_action.setEnabled(True)
+        self._import_translation_action.setEnabled(True)
         self._debug_action.setEnabled(True)
 
         if project.video_missing:
@@ -338,6 +409,7 @@ class MainWindow(QMainWindow):
         self._export_action.setEnabled(False)
         self._quick_export_action.setEnabled(False)
         self._ai_request_action.setEnabled(False)
+        self._import_translation_action.setEnabled(False)
         self._debug_action.setEnabled(False)
         self._refresh_recent()
 
@@ -370,12 +442,13 @@ class MainWindow(QMainWindow):
 
     # -- transcription ------------------------------------------------------
 
-    def _start_transcription(self, options: WhisperOptions) -> None:
+    def _start_transcription(self, options: WhisperOptions, *, resume: bool = False) -> None:
         if self.project is None or self._busy:
             return
 
         self._flush_edits()
-        if self.project.has_transcript:
+        # Continuing keeps what is there, so there is nothing to confirm.
+        if self.project.has_transcript and not resume:
             answer = QMessageBox.question(
                 self,
                 "Replace the existing transcript?",
@@ -400,7 +473,7 @@ class MainWindow(QMainWindow):
         self._set_project_actions_enabled(False)
 
         self._transcribe_thread = QThread(self)
-        self._transcribe_worker = TranscriptionWorker(self.project, options)
+        self._transcribe_worker = TranscriptionWorker(self.project, options, resume=resume)
         self._transcribe_worker.progress.connect(self._on_transcription_progress)
         self._transcribe_worker.finished.connect(self._on_transcription_finished)
         self._transcribe_worker.failed.connect(self._on_transcription_failed)
@@ -408,10 +481,12 @@ class MainWindow(QMainWindow):
         run_in_thread(self._transcribe_worker, self._transcribe_thread)
 
     def _on_transcription_progress(self, stage: str, fraction: float, message: str) -> None:
+        self._set_status_progress(stage, fraction)
         self._lecture_view.update_progress(stage, fraction, message)
         self.statusBar().showMessage(f"{stage} — {message}" if message else stage)
 
     def _finish_transcription(self) -> None:
+        self._show_status_progress(False)
         if self._transcribe_thread is not None:
             self._transcribe_thread.quit()
             self._transcribe_thread.wait(15000)
@@ -522,10 +597,12 @@ class MainWindow(QMainWindow):
         run_in_thread(self._slides_worker, self._slides_thread)
 
     def _on_slides_progress(self, stage: str, fraction: float, message: str) -> None:
+        self._set_status_progress(stage, fraction)
         self._lecture_view.update_slide_progress(stage, fraction, message)
         self.statusBar().showMessage(f"{stage} — {message}" if message else stage)
 
     def _finish_slide_detection(self) -> None:
+        self._show_status_progress(False)
         if self._slides_thread is not None:
             self._slides_thread.quit()
             self._slides_thread.wait(15000)
@@ -537,11 +614,27 @@ class MainWindow(QMainWindow):
         self._finish_slide_detection()
         self._align()
         self._lecture_view.refresh_slides()
+        self._tidy_sentences_after_detection()
 
         count = len(self.project.slides) if self.project else 0
         summary = f"{count} slides detected"
         self._lecture_view.end_slide_detection(summary + ".")
         self.statusBar().showMessage(summary, 10000)
+
+    def _tidy_sentences_after_detection(self) -> None:
+        """Split lines that the new slide boundaries run through (§10).
+
+        Only on a transcript nobody has corrected yet: this is a real edit to
+        the transcript, undoable like any other, and it must never rearrange
+        work the user has already done by hand.
+        """
+        project = self.project
+        if project is None or project.transcript.is_empty:
+            return
+        if project.transcript.can_undo or not project.is_original_transcript():
+            return
+        if self._lecture_view.split_at_slide_changes(quiet=True):
+            self._save_transcript()
 
     def _on_slides_failed(self, message: str) -> None:
         self._finish_slide_detection()
@@ -635,6 +728,18 @@ class MainWindow(QMainWindow):
             f"Slide {appearance_id} now starts at {format_hms(seconds)}",
         )
 
+    def _separate_slide(self, appearance_id: int) -> None:
+        def apply(slides: SlideSet) -> None:
+            assert self.project is not None
+            appearance = separate_slide(slides, appearance_id)
+            options = self.project.meta.slide_detection
+            settle = options.timing.settle_seconds if options else 1.0
+            moment = min(appearance.start + settle, max(appearance.start, appearance.end - 0.1))
+            image = capture_slide_image(self.project, appearance.slide_id, moment, options)
+            set_slide_image(slides, appearance.slide_id, image)
+
+        self._edit_slides(apply, f"Slide {appearance_id} is now its own slide")
+
     def _recapture_slide(self, appearance_id: int, seconds: float) -> None:
         def apply(slides: SlideSet) -> None:
             assert self.project is not None
@@ -705,7 +810,18 @@ class MainWindow(QMainWindow):
 
     def _export_snapshot(self) -> tuple[LectureDocument, ExportSettings, Path] | None:
         """Everything a background export needs, taken on the UI thread."""
-        if self.project is None or self._busy or self._export_thread is not None:
+        if self.project is None:
+            return None
+        if self._export_thread is not None:
+            # Silence here reads as a frozen application; say what is going on.
+            self.statusBar().showMessage(
+                "An export is already running - one moment...", 5000
+            )
+            return None
+        if self._busy:
+            self.statusBar().showMessage(
+                "Wait for the current processing to finish, then export.", 5000
+            )
             return None
         self._lecture_view.finish_editing()
         self._flush_edits()
@@ -722,7 +838,12 @@ class MainWindow(QMainWindow):
 
         document, settings, output = snapshot
         settings.formats = [ExportFormat.PDF, ExportFormat.MARKDOWN]
-        self._run_export_job(lambda: run_export(document, settings, output), ai_request=False)
+        self._run_export_job(
+            lambda report: run_export(
+                document, settings, output, on_progress=self._export_reporter(report)
+            ),
+            ai_request=False,
+        )
 
     def _ai_translation_request(self) -> None:
         """Export the lecture with a Korean translation request at the top."""
@@ -754,17 +875,58 @@ class MainWindow(QMainWindow):
 
         document, settings, output = snapshot
         self._run_export_job(
-            lambda: run_ai_request_export(document, settings.pdf, output), ai_request=True
+            lambda report: run_ai_request_export(
+                document, settings.pdf, output, on_progress=self._export_reporter(report)
+            ),
+            ai_request=True,
         )
 
-    def _run_export_job(self, job: Callable[[], object], *, ai_request: bool) -> None:
+    def _import_translation(self) -> None:
+        """Bring an assistant's translation back and attach it to the slides."""
+        if self.project is None or self._busy:
+            return
+        from .translation_dialog import TranslationDialog
+
+        dialog = TranslationDialog(self.project, self)
+        dialog.changed.connect(self._lecture_view.refresh_translations)
+        dialog.changed.connect(
+            lambda: self.statusBar().showMessage("Translation updated", 6000)
+        )
+        dialog.exec()
+
+    @staticmethod
+    def _export_reporter(report: Callable[[str, float], None]) -> Callable[..., None]:
+        """Adapt an exporter's (format, position, total) to (stage, fraction)."""
+
+        def on_progress(export_format: object, position: int, total: int) -> None:
+            label = getattr(export_format, "label", str(export_format))
+            fraction = position / total if total else -1.0
+            report(f"Writing {label}...", fraction)
+
+        return on_progress
+
+    def _run_export_job(
+        self, job: Callable[[Callable[[str, float], None]], object], *, ai_request: bool
+    ) -> None:
         self._lecture_view.set_export_enabled(False)
-        self.statusBar().showMessage("Exporting...")
+        self.statusBar().showMessage(
+            "Writing the export files... this can take a moment for a long lecture."
+        )
+        self._set_status_progress("Preparing the export...", 0.0)
+        # A cursor that says "working" is the difference between a slow export
+        # and an application the user believes has died.
+        QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        self._export_is_ai_request = ai_request
         self._export_thread = QThread(self)
         self._export_worker = JobWorker(job)
-        self._export_worker.finished.connect(
-            lambda result: self._on_export_job_finished(result, ai_request)
-        )
+        # Both slots must be bound methods of this window, never lambdas: a
+        # plain callable has no receiver object, so Qt takes its thread from the
+        # *sender* - the worker - and runs it there. That would put widget work
+        # (a message box, the status bar) on a background thread, where Qt
+        # refuses to draw it and the window is left blocked by a dialog that
+        # never appears.
+        self._export_worker.progress.connect(self._set_status_progress)
+        self._export_worker.finished.connect(self._on_export_job_finished)
         run_in_thread(self._export_worker, self._export_thread)
 
     def _wait_for_export(self) -> None:
@@ -773,7 +935,10 @@ class MainWindow(QMainWindow):
             self._export_thread.quit()
             self._export_thread.wait(60000)
 
-    def _on_export_job_finished(self, result: object, ai_request: bool) -> None:
+    def _on_export_job_finished(self, result: object) -> None:
+        ai_request = self._export_is_ai_request
+        QApplication.restoreOverrideCursor()
+        self._show_status_progress(False)
         if self._export_thread is not None:
             self._export_thread.quit()
             self._export_thread.wait(15000)
@@ -806,6 +971,7 @@ class MainWindow(QMainWindow):
 
         box = QMessageBox(self)
         box.setWindowTitle("AI translation request" if ai_request else "Export")
+        box.setWindowModality(Qt.WindowModality.WindowModal)
         box.setIcon(QMessageBox.Icon.Information if not failures else QMessageBox.Icon.Warning)
         box.setText("\n".join(lines) or "Nothing was exported.")
         open_button = box.addButton("Open folder", QMessageBox.ButtonRole.ActionRole)
@@ -814,6 +980,13 @@ class MainWindow(QMainWindow):
         if ai_request and markdown is not None:
             copy_button = box.addButton("Copy request text", QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Ok)
+        # The export runs in the background, so the user may well be in another
+        # window by now: bring the answer to the front and flash the taskbar
+        # rather than leaving a modal dialog hidden behind the main window.
+        box.show()
+        box.raise_()
+        box.activateWindow()
+        QApplication.alert(box, 3000)
         box.exec()
 
         clicked = box.clickedButton()
@@ -843,14 +1016,21 @@ class MainWindow(QMainWindow):
     @property
     def _busy(self) -> bool:
         """True while any background pipeline is running."""
-        return self._transcribe_thread is not None or self._slides_thread is not None
+        return (
+            self._transcribe_thread is not None
+            or self._slides_thread is not None
+            or self._probe_thread is not None
+        )
 
     def _set_project_actions_enabled(self, enabled: bool) -> None:
         self._new_action.setEnabled(enabled)
         self._open_action.setEnabled(enabled)
         self._close_action.setEnabled(enabled)
         has_project = enabled and self.project is not None
-        for action in (self._export_action, self._quick_export_action, self._ai_request_action):
+        for action in (
+            self._export_action, self._quick_export_action,
+            self._ai_request_action, self._import_translation_action,
+        ):
             action.setEnabled(has_project)
         self._lecture_view.set_export_enabled(enabled)
 
@@ -915,11 +1095,35 @@ class MainWindow(QMainWindow):
 
     def _restore_geometry(self) -> None:
         geometry = self.settings.get("window_geometry")
-        if isinstance(geometry, list) and len(geometry) == 4:
-            try:
-                self.setGeometry(*(int(v) for v in geometry))
-            except (TypeError, ValueError):
-                pass
+        if not (isinstance(geometry, list) and len(geometry) == 4):
+            return
+        try:
+            rect = QRect(*(int(value) for value in geometry))
+        except (TypeError, ValueError):
+            return
+        self.setGeometry(self._fit_to_screen(rect))
+
+    @staticmethod
+    def _fit_to_screen(rect: QRect) -> QRect:
+        """Keep a remembered window inside the screen it will open on.
+
+        A window saved on a larger or differently arranged display can otherwise
+        come back half off-screen, with the buttons at its edges unreachable.
+        """
+        screen = QGuiApplication.screenAt(rect.center()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return rect
+        available = screen.availableGeometry()
+        fitted = QRect(rect)
+        fitted.setWidth(min(fitted.width(), available.width()))
+        fitted.setHeight(min(fitted.height(), available.height()))
+        # QRect.right()/bottom() are inclusive; compute the limits from the
+        # size instead, or a maximised window comes back one pixel too high.
+        right_limit = available.x() + available.width() - fitted.width()
+        bottom_limit = available.y() + available.height() - fitted.height()
+        fitted.moveLeft(min(max(fitted.left(), available.left()), right_limit))
+        fitted.moveTop(min(max(fitted.top(), available.top()), bottom_limit))
+        return fitted
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt naming
         if not self._confirm_stop_transcription():

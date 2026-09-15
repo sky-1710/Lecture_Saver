@@ -39,6 +39,7 @@ from ..export.options import (
     PdfOptions,
     preset_name_for,
 )
+from .theme import Role, set_role
 from .workers import ExportWorker, run_in_thread
 
 log = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class ExportDialog(QDialog):
     def __init__(self, project: Project, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         self._project = project
         self._thread: QThread | None = None
         self._worker: ExportWorker | None = None
@@ -77,13 +78,16 @@ class ExportDialog(QDialog):
         # Outputs
         outputs = QGroupBox("Output")
         outputs_layout = QGridLayout(outputs)
+        outputs_layout.setVerticalSpacing(6)
+        outputs_layout.setColumnMinimumWidth(0, 230)
+        outputs_layout.setColumnStretch(1, 1)
         self._format_checks: dict[ExportFormat, QCheckBox] = {}
         for row, export_format in enumerate(ExportFormat):
             check = QCheckBox(export_format.label)
             check.setChecked(export_format in settings.formats)
             check.toggled.connect(self._update_availability)
             file_label = QLabel(FILE_NAMES[export_format])
-            file_label.setStyleSheet("color: #888;")
+            set_role(file_label, Role.SUBTLE)
             outputs_layout.addWidget(check, row, 0)
             outputs_layout.addWidget(file_label, row, 1)
             self._format_checks[export_format] = check
@@ -107,12 +111,15 @@ class ExportDialog(QDialog):
         # PDF options
         pdf = QGroupBox("PDF options")
         pdf_layout = QVBoxLayout(pdf)
+        pdf_layout.setSpacing(7)
         preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
         preset_row.addWidget(QLabel("Preset:"))
         self._preset = QComboBox()
         self._preset.addItems([*PDF_PRESETS.keys(), _CUSTOM])
         preset_row.addWidget(self._preset, 1)
         pdf_layout.addLayout(preset_row)
+        pdf_layout.addSpacing(2)
 
         self._pdf_checks = {
             "slide_image": QCheckBox("Slide image"),
@@ -120,6 +127,7 @@ class ExportDialog(QDialog):
             "time_range": QCheckBox("Slide time range"),
             "transcript": QCheckBox("Transcript"),
             "segment_timestamps": QCheckBox("Transcript timestamps"),
+            "translation": QCheckBox("Korean translation (when imported)"),
         }
         for name, check in self._pdf_checks.items():
             check.setChecked(getattr(settings.pdf, name))
@@ -130,7 +138,7 @@ class ExportDialog(QDialog):
             "transcript only."
         )
         self._slides_note.setWordWrap(True)
-        self._slides_note.setStyleSheet("color: #B26B00;")
+        set_role(self._slides_note, Role.WARNING)
         pdf_layout.addWidget(self._slides_note)
         self._pdf_box = pdf
         self._preset.currentTextChanged.connect(self._on_preset_chosen)
@@ -139,8 +147,11 @@ class ExportDialog(QDialog):
         # Destination
         destination = QGroupBox("Save to")
         destination_layout = QHBoxLayout(destination)
-        self._folder_label = QLabel(str(self._output_dir))
-        self._folder_label.setWordWrap(True)
+        destination_layout.setSpacing(8)
+        self._folder_label = QLabel()
+        self._folder_label.setMinimumWidth(220)
+        self._folder_label.setToolTip(str(self._output_dir))
+        set_role(self._folder_label, Role.MUTED)
         change = QPushButton("Change...")
         change.clicked.connect(self._choose_folder)
         reset = QPushButton("Project folder")
@@ -163,18 +174,22 @@ class ExportDialog(QDialog):
         close.clicked.connect(self.reject)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addWidget(self._open_folder)
         buttons.addStretch(1)
         buttons.addWidget(self._export_button)
         buttons.addWidget(close)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setSpacing(12)
         layout.addWidget(outputs)
         layout.addWidget(stamps)
         layout.addWidget(pdf)
         layout.addWidget(destination)
         layout.addWidget(self._status)
         layout.addLayout(buttons)
+        self._show_output_dir()
 
     # -- settings -------------------------------------------------------------
 
@@ -196,7 +211,15 @@ class ExportDialog(QDialog):
 
     def set_output_dir(self, path: Path) -> None:
         self._output_dir = Path(path)
-        self._folder_label.setText(str(self._output_dir))
+        self._show_output_dir()
+
+    def _show_output_dir(self) -> None:
+        """Show the destination, shortened in the middle if it is a long path."""
+        text = str(self._output_dir)
+        if len(text) > 58:
+            text = f"{text[:26]}...{text[-29:]}"
+        self._folder_label.setText(text)
+        self._folder_label.setToolTip(str(self._output_dir))
 
     def _on_preset_chosen(self, name: str) -> None:
         if self._syncing_preset or name not in PDF_PRESETS:
@@ -285,7 +308,7 @@ class ExportDialog(QDialog):
         self._export_button.setEnabled(not running)
         self._open_folder.setVisible(False)
         if running:
-            self._status.setStyleSheet("")
+            set_role(self._status, None)
             self._status.setText("Exporting...")
 
     def _on_progress(self, label: str, position: int, total: int) -> None:
@@ -310,7 +333,7 @@ class ExportDialog(QDialog):
         for export_format, message in result.failures:
             lines.append(f"{export_format.label} failed: {message}")
         self._status.setText("\n".join(lines))
-        self._status.setStyleSheet("" if result.ok else "color: #C0392B;")
+        set_role(self._status, None if result.ok else Role.DANGER)
         self._open_folder.setVisible(bool(result.written))
         self.exported.emit(result)
 

@@ -18,11 +18,21 @@ from PySide6.QtCore import (
     QObject,
     QPersistentModelIndex,
     QPoint,
+    QRect,
     QSize,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QAction, QColor, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -32,12 +42,18 @@ from PySide6.QtWidgets import (
     QMenu,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core.slides import SlideAppearance, SlideSet
 from ..core.timecode import format_hms
+from . import theme
+from .theme import Role, set_flag, set_role
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +84,9 @@ class SlideModel(QAbstractListModel):
         self._pixmaps.clear()
         self.endResetModel()
 
+    def repeat_of(self, appearance: SlideAppearance) -> SlideAppearance | None:
+        return self._slides.repeat_of(appearance)
+
     def appearance_at_row(self, row: int) -> SlideAppearance | None:
         if 0 <= row < len(self._appearances):
             return self._appearances[row]
@@ -87,7 +106,7 @@ class SlideModel(QAbstractListModel):
             return None
         appearance = self._appearances[index.row()]
 
-        label = appearance.annotation_label
+        label = self._slides.label_for(appearance)
         if role == Qt.ItemDataRole.DisplayRole:
             first = f"Slide {appearance.appearance_id}" + (f" · {label}" if label else "")
             return f"{first}\n{format_hms(appearance.start)}"
@@ -133,10 +152,128 @@ class SlideModel(QAbstractListModel):
             # A slide whose frame could not be captured still needs a tile, or
             # the row would silently collapse.
             pixmap = QPixmap(THUMB_WIDTH, THUMB_HEIGHT)
-            pixmap.fill(QColor(0xE4, 0xE4, 0xE8))
+            pixmap.fill(QColor(theme.SURFACE_SUNKEN))
 
         self._pixmaps[appearance.appearance_id] = pixmap
         return pixmap
+
+
+class SlideDelegate(QStyledItemDelegate):
+    """Paints one navigator row: centred thumbnail, number and time beneath it.
+
+    Qt's own icon-mode row is only as wide as the tile, which leaves the
+    selection tint hanging under the caption. Painting the row makes it span
+    the pane, and lets the number and the timestamp sit at opposite ends of
+    the picture where they are easy to scan.
+    """
+
+    PAD_X = 6
+    PAD_Y = 8
+    CAPTION_GAP = 6
+
+    def __init__(self, view: QListView) -> None:
+        super().__init__(view)
+        self._view = view
+        self._time_font = QFont("Consolas")
+        self._time_font.setPointSizeF(max(7.5, view.font().pointSizeF() - 1.0))
+
+    def _caption_height(self) -> int:
+        return max(
+            QFontMetrics(self._view.font()).height(),
+            QFontMetrics(self._time_font).height(),
+        )
+
+    def sizeHint(
+        self,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> QSize:
+        width = max(THUMB_WIDTH + self.PAD_X * 2, self._view.viewport().width())
+        height = THUMB_HEIGHT + self.CAPTION_GAP + self._caption_height() + self.PAD_Y * 2
+        return QSize(width, height)
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
+
+        row = opt.rect.adjusted(3, 2, -3, -2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if selected:
+            painter.setBrush(QColor(theme.ACCENT_SOFT))
+            painter.drawRoundedRect(row, 8, 8)
+        elif hovered:
+            painter.setBrush(QColor(theme.SURFACE_HOVER))
+            painter.drawRoundedRect(row, 8, 8)
+
+        pixmap = index.data(Qt.ItemDataRole.DecorationRole)
+        width = pixmap.width() if isinstance(pixmap, QPixmap) else THUMB_WIDTH
+        height = pixmap.height() if isinstance(pixmap, QPixmap) else THUMB_HEIGHT
+        left = row.left() + (row.width() - width) // 2
+        top = row.top() + self.PAD_Y
+        picture = QRect(left, top, width, height)
+
+        clip = QPainterPath()
+        clip.addRoundedRect(picture, 5, 5)
+        painter.save()
+        painter.setClipPath(clip)
+        if isinstance(pixmap, QPixmap):
+            painter.drawPixmap(picture, pixmap)
+        painter.restore()
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QColor(theme.ACCENT if selected else theme.BORDER_STRONG))
+        painter.drawRoundedRect(picture, 5, 5)
+
+        # "Slide 3 - 2nd time" on the left, its start time on the right. A slide
+        # with a label is easily wider than the tile, so the title is elided:
+        # the time it would otherwise be painted over is the more scannable half.
+        display = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        title, _, when = display.partition("\n")
+        # The caption uses the whole row, not just the picture: a 4:3 slide
+        # leaves a tile barely wider than "Slide 12", and the label belongs here.
+        caption = QRect(
+            row.left() + self.PAD_X, picture.bottom() + self.CAPTION_GAP,
+            row.width() - self.PAD_X * 2, self._caption_height(),
+        )
+
+        painter.setFont(self._time_font)
+        time_width = QFontMetrics(self._time_font).horizontalAdvance(when)
+        painter.setPen(QColor(theme.ACCENT if selected else theme.SUBTLE))
+        painter.drawText(
+            caption,
+            int(Qt.AlignmentFlag.AlignRight) | int(Qt.AlignmentFlag.AlignVCenter),
+            when,
+        )
+
+        painter.setFont(self._view.font())
+        metrics = QFontMetrics(self._view.font())
+        room = max(20, caption.width() - time_width - self.CAPTION_GAP * 2)
+        painter.setPen(QColor(theme.TEXT if selected else theme.MUTED))
+        painter.drawText(
+            QRect(caption.left(), caption.top(), room, caption.height()),
+            int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignVCenter),
+            metrics.elidedText(title, Qt.TextElideMode.ElideRight, room),
+        )
+        painter.restore()
+
+
+class _SlideList(QListView):
+    """A list whose rows are as wide as the pane, however it is resized."""
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        # The delegate measures rows against the viewport, so re-measure them.
+        self.scheduleDelayedItemsLayout()
 
 
 class SlidePanel(QFrame):
@@ -156,16 +293,18 @@ class SlidePanel(QFrame):
     recaptureRequested = Signal(int)     # appearance id
     splitHereRequested = Signal()        # split at the current playback time
     moveBoundaryRequested = Signal(int)  # move this slide's start to now
+    separateRequested = Signal(int)      # not the same slide as an earlier one
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        set_flag(self, "card")
         self._running = False
 
         title = QLabel("Slides")
-        title.setStyleSheet("font-weight: 600;")
+        set_role(title, Role.SECTION)
         self._count_label = QLabel("")
-        self._count_label.setStyleSheet("color: #666;")
+        set_role(self._count_label, Role.MUTED)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -174,9 +313,10 @@ class SlidePanel(QFrame):
         header.addWidget(self._count_label)
 
         self._detect_button = QPushButton("Detect slides")
-        self._detect_button.setMinimumHeight(30)
+        self._detect_button.setMinimumHeight(32)
+        set_flag(self._detect_button, "accent")
         self._cancel_button = QPushButton("Cancel")
-        self._cancel_button.setMinimumHeight(30)
+        self._cancel_button.setMinimumHeight(32)
         self._cancel_button.setVisible(False)
 
         buttons = QHBoxLayout()
@@ -186,27 +326,36 @@ class SlidePanel(QFrame):
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
-        self._progress.setVisible(False)
+        self._progress.setTextVisible(False)
+        self._percent_label = QLabel("")
+        self._percent_label.setMinimumWidth(38)
+        self._percent_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        set_role(self._percent_label, Role.SECTION)
+        self._progress_row = QWidget()
+        progress_row = QHBoxLayout(self._progress_row)
+        progress_row.setContentsMargins(0, 0, 0, 0)
+        progress_row.setSpacing(8)
+        progress_row.addWidget(self._progress, 1)
+        progress_row.addWidget(self._percent_label)
+        self._progress_row.setVisible(False)
 
         self._status_label = QLabel("No slides detected yet.")
         self._status_label.setWordWrap(True)
-        self._status_label.setStyleSheet("color: #666;")
+        set_role(self._status_label, Role.MUTED)
 
         self._model = SlideModel(self)
-        self._list = QListView()
+        self._list = _SlideList()
         self._list.setModel(self._model)
-        # Icon mode puts the caption under the thumbnail instead of squeezing
-        # it into the remaining width, which is what a narrow navigator needs.
-        self._list.setViewMode(QListView.ViewMode.IconMode)
-        self._list.setFlow(QListView.Flow.TopToBottom)
-        self._list.setWrapping(False)
+        # The caption goes under the thumbnail rather than being squeezed into
+        # the remaining width, which is what a narrow navigator needs.
+        self._list.setItemDelegate(SlideDelegate(self._list))
         self._list.setMovement(QListView.Movement.Static)
         self._list.setResizeMode(QListView.ResizeMode.Adjust)
-        self._list.setIconSize(QSize(THUMB_WIDTH, THUMB_HEIGHT))
-        self._list.setGridSize(QSize(THUMB_WIDTH + 16, THUMB_HEIGHT + 46))
         self._list.setUniformItemSizes(True)
-        self._list.setWordWrap(True)
-        self._list.setSpacing(2)
+        self._list.setMouseTracking(True)
+        self._list.setSpacing(0)
         self._list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -225,16 +374,24 @@ class SlidePanel(QFrame):
             "Right-click a slide to delete, merge, move its start, or re-capture it."
         )
         self._edit_hint.setWordWrap(True)
-        self._edit_hint.setStyleSheet("color: #888;")
+        set_role(self._edit_hint, Role.SUBTLE)
         self._edit_hint.setVisible(False)
 
+        # Holds the space the list would take, so an empty navigator does not
+        # spread its controls down the whole pane.
+        self._filler = QWidget()
+        self._filler.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(9)
         layout.addLayout(header)
         layout.addLayout(buttons)
-        layout.addWidget(self._progress)
+        layout.addWidget(self._progress_row)
         layout.addWidget(self._status_label)
+        layout.addWidget(self._filler, 1)
         layout.addWidget(self._list, 1)
         layout.addWidget(self._split_button)
         layout.addWidget(self._edit_hint)
@@ -250,7 +407,10 @@ class SlidePanel(QFrame):
     def set_slides(self, slide_set: SlideSet, project_root: Path) -> None:
         self._model.set_slides(slide_set, project_root)
         count = len(slide_set)
+        # Detecting is the obvious next step until it has been done once.
+        set_flag(self._detect_button, "accent", not count)
         self._list.setVisible(count > 0)
+        self._filler.setVisible(count == 0)
         self._edit_hint.setVisible(count > 0)
         self._split_button.setEnabled(count > 0)
         self._count_label.setText(f"{count}" if count else "")
@@ -298,23 +458,32 @@ class SlidePanel(QFrame):
         self._cancel_button.setVisible(True)
         self._cancel_button.setEnabled(True)
         self._cancel_button.setText("Cancel")
-        self._progress.setVisible(True)
+        self._progress_row.setVisible(True)
+        self._percent_label.setText("")
         self._progress.setRange(0, 0)
 
     def end_run(self, message: str) -> None:
         self._running = False
         self._detect_button.setVisible(True)
         self._cancel_button.setVisible(False)
-        self._progress.setVisible(False)
+        self._progress_row.setVisible(False)
+        self._percent_label.setText("")
         self._status_label.setText(message)
 
     def update_progress(self, stage: str, fraction: float, message: str) -> None:
         if fraction < 0:
             self._progress.setRange(0, 0)
+            self._percent_label.setText("...")
         else:
+            percent = max(0, min(100, int(fraction * 100)))
             self._progress.setRange(0, 100)
-            self._progress.setValue(int(fraction * 100))
+            self._progress.setValue(percent)
+            self._percent_label.setText(f"{percent}%")
         self._status_label.setText(f"{stage}\n{message}" if message else stage)
+
+    @property
+    def percent_text(self) -> str:
+        return self._percent_label.text()
 
     # -- events -------------------------------------------------------------
 
@@ -345,12 +514,20 @@ class SlidePanel(QFrame):
         move.setToolTip(
             "Use this when the boundary was found a little early or late."
         )
+        repeat = self._model.repeat_of(appearance)
+        separate = QAction(
+            f"Treat as a different slide from Slide {repeat.appearance_id}"
+            if repeat is not None else "Treat as a different slide",
+            menu,
+        )
+        separate.setEnabled(repeat is not None)
         merge = QAction("Merge into previous slide", menu)
         merge.setEnabled(appearance.appearance_id > 1)
         delete = QAction("Delete this slide", menu)
 
         menu.addAction(recapture)
         menu.addAction(move)
+        menu.addAction(separate)
         menu.addSeparator()
         menu.addAction(merge)
         menu.addAction(delete)
@@ -358,6 +535,8 @@ class SlidePanel(QFrame):
         chosen = menu.exec(self._list.viewport().mapToGlobal(point))
         if chosen is recapture:
             self.recaptureRequested.emit(appearance.appearance_id)
+        elif chosen is separate:
+            self.separateRequested.emit(appearance.appearance_id)
         elif chosen is move:
             self.moveBoundaryRequested.emit(appearance.appearance_id)
         elif chosen is merge:

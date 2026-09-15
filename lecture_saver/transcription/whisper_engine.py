@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .segmentation import SentenceSegmenter, Word
+
 log = logging.getLogger(__name__)
 
 __all__ = [
@@ -51,12 +53,19 @@ class ModelLoadError(RuntimeError):
 #: (id, label, approximate download size, rough speed factor vs realtime on a
 #: 4-core laptop CPU with int8). The speed factors drive the time estimate the
 #: UI shows before a run; they are deliberately conservative.
+#: key, label, download size, speed as a multiple of real time on the CPU.
+#:
+#: Measured on a 4-core/8-thread laptop (i7-1165G7, int8, AVX-512 VNNI) with
+#: word timestamps on: a 36-minute lecture takes about 18 minutes with
+#: ``medium``. They are deliberately a little pessimistic, since an older or
+#: busier machine is slower, and an estimate that overshoots is kinder than one
+#: that runs out.
 MODEL_SIZES: tuple[tuple[str, str, str, float], ...] = (
-    ("tiny", "Tiny - fastest, lowest quality", "75 MB", 4.0),
-    ("base", "Base - fast, weak on Korean", "145 MB", 2.5),
-    ("small", "Small - balanced (recommended)", "480 MB", 1.2),
-    ("medium", "Medium - good quality, slow", "1.5 GB", 0.45),
-    ("large-v3", "Large v3 - best quality, very slow", "3.1 GB", 0.2),
+    ("tiny", "Tiny - fastest, lowest quality", "75 MB", 18.0),
+    ("base", "Base - fast, weak on Korean", "145 MB", 10.0),
+    ("small", "Small - balanced (recommended)", "480 MB", 6.0),
+    ("medium", "Medium - good quality, slow", "1.5 GB", 2.0),
+    ("large-v3", "Large v3 - best quality, very slow", "3.1 GB", 0.7),
 )
 
 LANGUAGE_CHOICES: tuple[tuple[str, str], ...] = (
@@ -97,10 +106,19 @@ class WhisperOptions:
     language: str = "auto"
     vad_filter: bool = True
     beam_size: int = 5
+    #: Ask Whisper for word times and cut the transcript where sentences end,
+    #: rather than wherever its decoder stopped (§10). Costs a little decoding
+    #: time and makes every line a sentence, which is what the slide matching
+    #: and the notes need.
+    sentence_lines: bool = True
 
     @property
     def whisper_language(self) -> str | None:
         return None if self.language == "auto" else self.language
+
+
+#: faster-whisper works on 16 kHz mono audio.
+SAMPLE_RATE = 16000
 
 
 @dataclass
@@ -219,18 +237,32 @@ class WhisperEngine:
         duration: float = 0.0,
         on_segment: SegmentCallback | None = None,
         should_cancel: CancelCheck | None = None,
+        start_at: float = 0.0,
     ) -> TranscriptionResult:
         """Transcribe ``audio_path``, streaming results as they are produced.
 
         ``on_segment`` receives each segment plus a 0..1 progress fraction.
         Cancellation is checked between segments, so it takes effect within a
         few seconds rather than at the end of the file.
+
+        ``start_at`` continues an interrupted run: the audio before it is
+        skipped and every timestamp is still relative to the whole lecture.
+        The audio is cut rather than using faster-whisper's clip option,
+        which would switch voice activity filtering off.
         """
         if self._model is None:
             raise ModelLoadError("The Whisper model has not been loaded yet.")
 
+        offset = max(0.0, float(start_at))
+        source: object = str(audio_path)
+        if offset > 0:
+            from faster_whisper.audio import decode_audio
+
+            audio = decode_audio(str(audio_path), sampling_rate=SAMPLE_RATE)
+            source = audio[int(offset * SAMPLE_RATE):]
+
         segments_iter, info = self._model.transcribe(
-            str(audio_path),
+            source,
             language=self.options.whisper_language,
             beam_size=self.options.beam_size,
             vad_filter=self.options.vad_filter,
@@ -238,26 +270,69 @@ class WhisperEngine:
             # faster-whisper's own guards against that.
             condition_on_previous_text=False,
             temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            # Word times are what let a line be cut where the sentence ends,
+            # instead of wherever the decoder happened to stop (§10).
+            word_timestamps=self.options.sentence_lines,
         )
 
-        total = duration or float(getattr(info, "duration", 0.0) or 0.0)
+        total = duration or offset + float(getattr(info, "duration", 0.0) or 0.0)
         language = getattr(info, "language", None)
 
         collected: list[RawSegment] = []
+        segmenter = SentenceSegmenter() if self.options.sentence_lines else None
+
+        def emit(segments: list[RawSegment], progress: float) -> None:
+            for segment in segments:
+                collected.append(segment)
+                if on_segment is not None:
+                    on_segment(segment, progress)
+
         for item in segments_iter:
             if should_cancel is not None and should_cancel():
                 break
 
             text = (item.text or "").strip()
-            if not text:
+            words = _words_of(item, offset)
+            reached = float(item.end) + offset
+            progress = min(1.0, reached / total) if total > 0 else 0.0
+
+            if segmenter is not None and words:
+                emit(
+                    [
+                        RawSegment(start=line.start, end=line.end, text=line.text)
+                        for line in segmenter.feed(words)
+                    ],
+                    progress,
+                )
                 continue
 
-            segment = RawSegment(start=float(item.start), end=float(item.end), text=text)
-            collected.append(segment)
+            # No word times - an older faster-whisper, or a chunk it could not
+            # align. Fall back to Whisper's own line, after whatever is pending.
+            if segmenter is not None and segmenter.pending:
+                emit(
+                    [
+                        RawSegment(start=line.start, end=line.end, text=line.text)
+                        for line in segmenter.flush()
+                    ],
+                    progress,
+                )
+            if not text:
+                continue
+            emit(
+                [RawSegment(start=float(item.start) + offset, end=reached, text=text)],
+                progress,
+            )
 
-            progress = min(1.0, segment.end / total) if total > 0 else 0.0
-            if on_segment is not None:
-                on_segment(segment, progress)
+        if segmenter is not None:
+            # A cancelled run keeps the tail too, so continuing later starts
+            # after it rather than repeating it.
+            emit(
+                [
+                    RawSegment(start=line.start, end=line.end, text=line.text)
+                    for line in segmenter.flush()
+                ],
+                1.0 if should_cancel is None or not should_cancel() else 0.0,
+            )
 
         return TranscriptionResult(
             segments=collected,
@@ -269,3 +344,21 @@ class WhisperEngine:
 
     def unload(self) -> None:
         self._model = None
+
+
+def _words_of(item: object, offset: float) -> list[Word]:
+    """The words of one Whisper segment, shifted by ``offset``.
+
+    Returns nothing when the build or the chunk has no word times, which is
+    what the caller falls back on.
+    """
+    raw = getattr(item, "words", None) or []
+    words: list[Word] = []
+    for word in raw:
+        text = str(getattr(word, "word", "") or "").strip()
+        start = getattr(word, "start", None)
+        end = getattr(word, "end", None)
+        if not text or start is None or end is None:
+            continue
+        words.append(Word(text=text, start=float(start) + offset, end=float(end) + offset))
+    return words

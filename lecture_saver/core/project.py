@@ -17,6 +17,12 @@ from .atomic_io import read_json, write_json_atomic
 from .models import ProjectMeta, StageStatus, Transcript, VideoInfo
 from .slides import SlideSet
 from .transcript_store import TranscriptStore
+from .translations import (
+    MatchResult,
+    TranslationSet,
+    match_translations,
+    parse_translation_text,
+)
 
 __all__ = ["Project", "ProjectError", "safe_project_dirname", "is_project_dir"]
 
@@ -28,6 +34,8 @@ TRANSCRIPT_FILE = "transcript.json"
 #: transcription run and never by editing, so the whole transcript can be reset.
 ORIGINAL_TRANSCRIPT_FILE = "transcript_original.json"
 SLIDES_FILE = "slides.json"
+#: Slide translations imported from an AI assistant's answer.
+TRANSLATIONS_FILE = "translations.json"
 
 
 class ProjectError(RuntimeError):
@@ -74,6 +82,8 @@ class Project:
         self.transcript = transcript
         #: Detected slides (Phase 3). Empty until detection has been run.
         self.slides = slides if slides is not None else SlideSet()
+        #: Imported slide translations. Empty until the user imports one.
+        self.translations = TranslationSet()
 
     # -- paths --------------------------------------------------------------
 
@@ -88,6 +98,10 @@ class Project:
     @property
     def original_transcript_file(self) -> Path:
         return self.root / ORIGINAL_TRANSCRIPT_FILE
+
+    @property
+    def translations_file(self) -> Path:
+        return self.root / TRANSLATIONS_FILE
 
     @property
     def slides_file(self) -> Path:
@@ -230,7 +244,21 @@ class Project:
         for sub in ("audio", "slides", "exports", "logs", "cache"):
             (root / sub).mkdir(exist_ok=True)
 
-        return cls(root, meta, transcript, slides)
+        project = cls(root, meta, transcript, slides)
+        project.translations = cls._load_translations(root)
+        return project
+
+    @staticmethod
+    def _load_translations(root: Path) -> TranslationSet:
+        """Read translations.json. A damaged file costs a re-import, not the project."""
+        path = root / TRANSLATIONS_FILE
+        if not path.is_file():
+            return TranslationSet()
+        try:
+            return TranslationSet.from_dict(read_json(path))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            log.warning("Ignoring an unreadable %s", TRANSLATIONS_FILE, exc_info=True)
+            return TranslationSet()
 
     @staticmethod
     def _load_slides(root: Path) -> SlideSet:
@@ -271,6 +299,37 @@ class Project:
         except OSError as exc:
             raise ProjectError(f"Could not save {TRANSCRIPT_FILE}:\n{exc}") from exc
         self.save_meta()
+
+    # -- imported translations -------------------------------------------------
+
+    def preview_translation(self, text: str) -> MatchResult:
+        """What importing ``text`` would attach to which slide, without saving."""
+        return match_translations(parse_translation_text(text), self.slides.appearances)
+
+    def import_translation(self, text: str, *, source: str = "") -> MatchResult:
+        """Attach an assistant's translation to the slides and save it.
+
+        Translations for slides not in the text are kept, so an answer that
+        arrived in several parts can be imported part by part.
+        """
+        result = self.preview_translation(text)
+        if result.matched:
+            self.translations.merge(result.matched, source=source)
+            self.save_translations()
+        return result
+
+    def clear_translations(self) -> None:
+        self.translations = TranslationSet()
+        try:
+            self.translations_file.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ProjectError(f"Could not remove {TRANSLATIONS_FILE}:\n{exc}") from exc
+
+    def save_translations(self) -> None:
+        try:
+            write_json_atomic(self.translations_file, self.translations.to_dict())
+        except OSError as exc:
+            raise ProjectError(f"Could not save {TRANSLATIONS_FILE}:\n{exc}") from exc
 
     # -- the original transcription ------------------------------------------
 

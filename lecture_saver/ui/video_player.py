@@ -19,6 +19,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -29,6 +30,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.timecode import format_clock
+from . import theme
+from .theme import Role, set_flag, set_role
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +62,7 @@ class VideoPlayer(QWidget):
         self._video = QVideoWidget(self)
         self._video.setMinimumHeight(220)
         self._video.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._video.setStyleSheet("background: #101013;")
+        self._video.setStyleSheet(f"background: {theme.VIDEO_BACKDROP};")
         self._player.setVideoOutput(self._video)
 
         self._duration_s = 0.0
@@ -74,20 +77,24 @@ class VideoPlayer(QWidget):
 
     def _build_controls(self) -> None:
         self._play_button = QPushButton("Play")
-        self._play_button.setFixedWidth(76)
+        self._play_button.setFixedWidth(80)
+        self._play_button.setMinimumHeight(30)
         self._play_button.setEnabled(False)
 
         self._back_button = QPushButton("-10s")
         self._forward_button = QPushButton("+10s")
         for button in (self._back_button, self._forward_button):
             button.setFixedWidth(58)
+            button.setMinimumHeight(30)
             button.setEnabled(False)
 
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(0, 0)
         self._slider.setEnabled(False)
+        self._slider.setMinimumWidth(80)
 
         self._time_label = QLabel("00:00 / 00:00")
+        set_role(self._time_label, Role.MUTED)
         self._time_label.setMinimumWidth(110)
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
@@ -95,23 +102,39 @@ class VideoPlayer(QWidget):
         for rate in PLAYBACK_RATES:
             self._rate_box.addItem(f"{rate:g}x", rate)
         self._rate_box.setCurrentIndex(PLAYBACK_RATES.index(1.0))
-        self._rate_box.setFixedWidth(66)
+        self._rate_box.setFixedWidth(72)
+        self._rate_box.setToolTip("Playback speed")
 
-        controls = QHBoxLayout()
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setSpacing(6)
-        controls.addWidget(self._play_button)
-        controls.addWidget(self._back_button)
-        controls.addWidget(self._forward_button)
-        controls.addWidget(self._slider, 1)
-        controls.addWidget(self._time_label)
-        controls.addWidget(self._rate_box)
+        # The transport sits on its own card under the picture, in two rows:
+        # the scrubber keeps its full width however narrow the pane gets.
+        scrub_row = QHBoxLayout()
+        scrub_row.setContentsMargins(0, 0, 0, 0)
+        scrub_row.setSpacing(10)
+        scrub_row.addWidget(self._slider, 1)
+        scrub_row.addWidget(self._time_label)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(8)
+        button_row.addWidget(self._play_button)
+        button_row.addWidget(self._back_button)
+        button_row.addWidget(self._forward_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self._rate_box)
+
+        self._controls = QFrame()
+        set_flag(self._controls, "card")
+        controls = QVBoxLayout(self._controls)
+        controls.setContentsMargins(12, 10, 12, 10)
+        controls.setSpacing(8)
+        controls.addLayout(scrub_row)
+        controls.addLayout(button_row)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
         layout.addWidget(self._video, 1)
-        layout.addLayout(controls)
+        layout.addWidget(self._controls)
 
     def _connect(self) -> None:
         self._play_button.clicked.connect(self.toggle_play)

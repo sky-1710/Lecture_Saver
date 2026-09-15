@@ -25,20 +25,23 @@ from __future__ import annotations
 import bisect
 import logging
 from collections.abc import Callable
+from html import escape as html_escape
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QTabBar,
+    QTextBrowser,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -46,12 +49,15 @@ from PySide6.QtWidgets import (
 
 from ..core.alignment import Alignment, align
 from ..core.project import Project
+from ..core.search import SearchHit, search_lecture
 from ..core.slides import SlideAppearance, SlideSet
 from ..core.timecode import format_duration, format_hms
 from ..core.transcript_store import TextMatch, TranscriptEditError, TranscriptStore
+from ..transcription.resume import resume_point
 from ..transcription.whisper_engine import WhisperOptions
 from .find_bar import FindBar
 from .slide_panel import SlidePanel
+from .theme import Role, set_flag, set_role
 from .transcribe_panel import TranscribePanel
 from .transcript_view import TranscriptView
 from .video_player import VideoPlayer
@@ -62,6 +68,7 @@ __all__ = ["LectureView"]
 
 TAB_SLIDE = 0
 TAB_FULL = 1
+TAB_SEARCH = 2
 PREVIEW_HEIGHT = 150
 
 
@@ -70,6 +77,8 @@ class LectureView(QWidget):
 
     #: Emitted when the user asks to start transcription.
     transcribeRequested = Signal(object)  # WhisperOptions
+    #: Continue an unfinished transcription.
+    resumeTranscriptionRequested = Signal(object)  # WhisperOptions
     cancelRequested = Signal()
     #: Emitted when the user asks to detect slides.
     detectSlidesRequested = Signal()
@@ -81,6 +90,7 @@ class LectureView(QWidget):
     slideRecaptureRequested = Signal(int, float)
     slideSplitRequested = Signal(float)
     slideMoveBoundaryRequested = Signal(int, float)
+    slideSeparateRequested = Signal(int)
     #: The project's source video is missing and the user wants to relocate it.
     relocateRequested = Signal()
     #: The transcript changed. ``True`` when segments were added, removed,
@@ -94,6 +104,8 @@ class LectureView(QWidget):
     quickExportRequested = Signal()
     #: Export the lecture with a Korean translation request on top.
     aiRequestRequested = Signal()
+    #: Bring an assistant's translation back in.
+    importTranslationRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -109,6 +121,7 @@ class LectureView(QWidget):
         self._rows: dict[int, int] = {}
         self._preview_cache: dict[str, QPixmap] = {}
         self._matches: list[TextMatch] = []
+        self._search_hits: list[SearchHit] = []
         self._match_index = -1
 
         self._build()
@@ -120,19 +133,17 @@ class LectureView(QWidget):
     def _build(self) -> None:
         # --- header ---
         self._title_label = QLabel()
-        self._title_label.setStyleSheet("font-size: 15px; font-weight: 600;")
+        set_role(self._title_label, Role.TITLE)
         self._subtitle_label = QLabel()
-        self._subtitle_label.setStyleSheet("color: #666;")
+        set_role(self._subtitle_label, Role.MUTED)
 
         self._warning_bar = QFrame()
-        self._warning_bar.setStyleSheet(
-            "background: #FFF4E5; border: 1px solid #F0C36D; border-radius: 4px;"
-        )
+        set_flag(self._warning_bar, "banner", "warning")
         self._warning_label = QLabel()
         self._warning_label.setWordWrap(True)
         self._relocate_button = QPushButton("Locate video...")
         warning_layout = QHBoxLayout(self._warning_bar)
-        warning_layout.setContentsMargins(10, 6, 10, 6)
+        warning_layout.setContentsMargins(12, 8, 12, 8)
         warning_layout.addWidget(self._warning_label, 1)
         warning_layout.addWidget(self._relocate_button)
         self._warning_bar.setVisible(False)
@@ -142,6 +153,7 @@ class LectureView(QWidget):
         titles.addWidget(self._title_label)
         titles.addWidget(self._subtitle_label)
         self._quick_export_button = QPushButton("Export PDF + MD")
+        set_flag(self._quick_export_button, "accent")
         self._quick_export_button.setToolTip(
             "Save the lecture notes as lecture_notes.pdf and transcript.md in the "
             "project's exports folder, with the options last used."
@@ -152,16 +164,27 @@ class LectureView(QWidget):
             "request at the top, ready to give to an AI assistant yourself.\n"
             "Nothing is sent anywhere."
         )
+        self._import_translation_button = QPushButton("Import translation")
+        self._import_translation_button.setToolTip(
+            "Paste or load the AI assistant's answer; each slide's translation "
+            "is shown under its transcript and included in exports."
+        )
         self._export_button = QPushButton("More formats...")
         self._export_button.setToolTip(
             "Choose formats and options: PDF, TXT, Markdown, SRT, VTT, JSON."
         )
         header = QHBoxLayout()
-        header.setContentsMargins(12, 10, 12, 4)
+        header.setContentsMargins(16, 12, 16, 12)
+        header.setSpacing(8)
         header.addLayout(titles, 1)
         header.addWidget(self._quick_export_button)
         header.addWidget(self._ai_request_button)
+        header.addWidget(self._import_translation_button)
         header.addWidget(self._export_button)
+        header_bar = QFrame()
+        set_flag(header_bar, "rule", "bottom")
+        set_flag(header_bar, "surface")
+        header_bar.setLayout(header)
 
         # --- left: slide navigator ---
         self._slides_pane = SlidePanel()
@@ -185,7 +208,8 @@ class LectureView(QWidget):
 
         centre = QWidget()
         centre_layout = QVBoxLayout(centre)
-        centre_layout.setContentsMargins(6, 6, 6, 6)
+        centre_layout.setContentsMargins(0, 0, 0, 0)
+        centre_layout.setSpacing(6)
         centre_layout.addWidget(self._player, 1)
         centre_layout.addLayout(follow_bar)
 
@@ -193,11 +217,12 @@ class LectureView(QWidget):
         self._panel = TranscribePanel()
 
         self._transcript_header = QLabel("Transcript")
-        self._transcript_header.setStyleSheet("font-weight: 600;")
+        set_role(self._transcript_header, Role.SECTION)
 
         self._tabs = QTabBar()
         self._tabs.addTab("Current slide")
         self._tabs.addTab("Full transcript")
+        self._tabs.addTab("Search")
         self._tabs.setDrawBase(False)
         self._tabs.setExpanding(False)
         # Two short tabs: scroll arrows would hide one of them in a narrow pane.
@@ -205,7 +230,8 @@ class LectureView(QWidget):
         self._tabs.setVisible(False)
 
         transcript_bar = QHBoxLayout()
-        transcript_bar.setContentsMargins(12, 8, 12, 4)
+        transcript_bar.setContentsMargins(14, 10, 14, 2)
+        transcript_bar.setSpacing(10)
         transcript_bar.addWidget(self._transcript_header)
         transcript_bar.addWidget(self._tabs)
         transcript_bar.addStretch(1)
@@ -217,13 +243,13 @@ class LectureView(QWidget):
         self._find_button = QToolButton()
         self._reset_button = QToolButton()
         self._save_label = QLabel("")
-        self._save_label.setStyleSheet("color: #888;")
-        self._edit_hint = QLabel("Double-click a line to correct it")
-        self._edit_hint.setStyleSheet("color: #888;")
+        set_role(self._save_label, Role.SUBTLE)
+        self._edit_hint = QLabel("Double-click to edit")
+        set_role(self._edit_hint, Role.SUBTLE)
         self._edit_bar = QWidget()
         edit_layout = QHBoxLayout(self._edit_bar)
-        edit_layout.setContentsMargins(12, 0, 12, 4)
-        edit_layout.setSpacing(4)
+        edit_layout.setContentsMargins(10, 2, 12, 6)
+        edit_layout.setSpacing(2)
         edit_layout.addWidget(self._undo_button)
         edit_layout.addWidget(self._redo_button)
         edit_layout.addWidget(self._find_button)
@@ -233,6 +259,9 @@ class LectureView(QWidget):
         edit_layout.addStretch(1)
         edit_layout.addWidget(self._save_label)
         self._edit_bar.setVisible(False)
+        # The hint is the first thing to go when the pane gets narrow: the
+        # buttons beside it are the part that has to stay reachable.
+        self._edit_bar.installEventFilter(self)
 
         self._find_bar = FindBar()
         self._find_bar.setVisible(False)
@@ -246,38 +275,90 @@ class LectureView(QWidget):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
         )
         self._slide_title = QLabel()
-        self._slide_title.setStyleSheet("font-weight: 600;")
+        set_role(self._slide_title, Role.SECTION)
         self._slide_detail = QLabel()
-        self._slide_detail.setStyleSheet("color: #666;")
+        set_role(self._slide_detail, Role.MUTED)
+        set_flag(self._slide_header, "rule", "bottom")
         slide_header_layout = QVBoxLayout(self._slide_header)
-        slide_header_layout.setContentsMargins(12, 4, 12, 6)
-        slide_header_layout.setSpacing(2)
+        slide_header_layout.setContentsMargins(14, 6, 14, 10)
+        slide_header_layout.setSpacing(3)
         slide_header_layout.addWidget(self._slide_preview)
         slide_header_layout.addWidget(self._slide_title)
         slide_header_layout.addWidget(self._slide_detail)
         self._slide_header.setVisible(False)
 
         self._transcript = TranscriptView()
+
+        # The imported translation of the slide shown, under its transcript.
+        self._translation_panel = QFrame()
+        set_flag(self._translation_panel, "rule", "top")
+        translation_title = QLabel("한국어 직역")
+        set_role(translation_title, Role.SECTION)
+        self._translation_text = QTextBrowser()
+        self._translation_text.setOpenLinks(False)
+        self._translation_text.setMaximumHeight(170)
+        set_role(self._translation_text, Role.TRANSLATION)
+        translation_layout = QVBoxLayout(self._translation_panel)
+        translation_layout.setContentsMargins(14, 8, 14, 8)
+        translation_layout.setSpacing(3)
+        translation_layout.addWidget(translation_title)
+        translation_layout.addWidget(self._translation_text)
+        self._translation_panel.setVisible(False)
+
+        # Lecture search (§18): results with slide number and time.
+        self._search_panel = QWidget()
+        self._search_field = QLineEdit()
+        self._search_field.setPlaceholderText(
+            "Search the lecture - words in any order, spacing ignored"
+        )
+        self._search_field.setClearButtonEnabled(True)
+        self._search_count = QLabel("")
+        set_role(self._search_count, Role.MUTED)
+        self._search_results = QTextBrowser()
+        self._search_results.setOpenLinks(False)
+        search_layout = QVBoxLayout(self._search_panel)
+        search_layout.setContentsMargins(14, 8, 10, 8)
+        search_layout.setSpacing(6)
+        search_layout.addWidget(self._search_field)
+        search_layout.addWidget(self._search_count)
+        search_layout.addWidget(self._search_results, 1)
+        self._search_panel.setVisible(False)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+
         self._empty_label = QLabel(
             "No transcript yet.\n\nChoose a model above and select "
             "“Transcribe lecture”. Everything runs on this computer."
         )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
-        self._empty_label.setStyleSheet("color: #888;")
+        self._empty_label.setMargin(18)
+        set_role(self._empty_label, Role.SUBTLE)
+
+        # The transcript and everything that acts on it live in one card, so
+        # the pane reads as a single surface rather than a stack of strips.
+        transcript_card = QFrame()
+        set_flag(transcript_card, "card")
+        card_layout = QVBoxLayout(transcript_card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+        card_layout.addLayout(transcript_bar)
+        card_layout.addWidget(self._edit_bar)
+        card_layout.addWidget(self._find_bar)
+        card_layout.addWidget(self._slide_header)
+        card_layout.addWidget(self._empty_label, 1)
+        card_layout.addWidget(self._transcript, 1)
+        card_layout.addWidget(self._translation_panel)
+        card_layout.addWidget(self._search_panel, 1)
 
         right = QWidget()
         right.setMinimumWidth(300)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
+        right_layout.setSpacing(10)
         right_layout.addWidget(self._panel)
-        right_layout.addLayout(transcript_bar)
-        right_layout.addWidget(self._edit_bar)
-        right_layout.addWidget(self._find_bar)
-        right_layout.addWidget(self._slide_header)
-        right_layout.addWidget(self._empty_label, 1)
-        right_layout.addWidget(self._transcript, 1)
+        right_layout.addWidget(transcript_card, 1)
         self._transcript.setVisible(False)
 
         # --- assembly ---
@@ -291,14 +372,23 @@ class LectureView(QWidget):
         self._splitter.setSizes([240, 590, 410])
         # Keeps the window usable when it is made small (§11).
         self._splitter.setChildrenCollapsible(True)
+        self._splitter.setHandleWidth(10)
         self._splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        # The panes are cards on the window colour: the gap between them is the
+        # splitter handle, and these margins are the gap around the outside.
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(12, 12, 12, 12)
+        body_layout.setSpacing(10)
+        body_layout.addWidget(self._warning_bar)
+        body_layout.addWidget(self._splitter, 1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addLayout(header)
-        layout.addWidget(self._warning_bar)
-        layout.addWidget(self._splitter, 1)
+        layout.setSpacing(0)
+        layout.addWidget(header_bar)
+        layout.addWidget(body, 1)
 
     def _connect(self) -> None:
         self._player.positionChanged.connect(self._on_position)
@@ -306,11 +396,13 @@ class LectureView(QWidget):
         self._transcript.seekRequested.connect(self._on_seek_requested)
         self._follow_check.toggled.connect(self._transcript.set_follow_playback)
         self._panel.startRequested.connect(self.transcribeRequested)
+        self._panel.resumeRequested.connect(self.resumeTranscriptionRequested)
         self._panel.cancelRequested.connect(self.cancelRequested)
         self._relocate_button.clicked.connect(self.relocateRequested)
         self._export_button.clicked.connect(self.exportRequested)
         self._quick_export_button.clicked.connect(self.quickExportRequested)
         self._ai_request_button.clicked.connect(self.aiRequestRequested)
+        self._import_translation_button.clicked.connect(self.importTranslationRequested)
 
         self._transcript.textEdited.connect(self._on_text_edited)
         self._transcript.editingFinished.connect(self._on_editing_finished)
@@ -331,6 +423,10 @@ class LectureView(QWidget):
         self._find_bar.replaceAllRequested.connect(self._replace_all)
         self._find_bar.closed.connect(self._on_find_closed)
 
+        self._search_field.textChanged.connect(self._search_timer.start)
+        self._search_field.returnPressed.connect(self._run_search)
+        self._search_timer.timeout.connect(self._run_search)
+        self._search_results.anchorClicked.connect(self._on_search_link)
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._slides_pane.slideActivated.connect(self._on_slide_activated)
         self._slides_pane.seekRequested.connect(self._on_seek_requested)
@@ -341,6 +437,12 @@ class LectureView(QWidget):
         self._slides_pane.recaptureRequested.connect(self._on_recapture)
         self._slides_pane.splitHereRequested.connect(self._on_split_here)
         self._slides_pane.moveBoundaryRequested.connect(self._on_move_boundary)
+        self._slides_pane.separateRequested.connect(self.slideSeparateRequested)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if watched is self._edit_bar and event.type() == QEvent.Type.Resize:
+            self._edit_hint.setVisible(self._edit_bar.width() >= 430)
+        return super().eventFilter(watched, event)
 
     # -- project binding ----------------------------------------------------
 
@@ -399,6 +501,8 @@ class LectureView(QWidget):
         if self._project is None:
             return
         self._panel.set_already_transcribed(len(self._project.transcript))
+        point = resume_point(self._project)
+        self._panel.set_resume_point(point.start if point is not None else None)
         self._rebind()
 
     def refresh_slides(self) -> None:
@@ -421,10 +525,15 @@ class LectureView(QWidget):
         self._preview_cache.clear()
         self._tabs.setVisible(False)
         self._slide_header.setVisible(False)
+        self._translation_panel.setVisible(False)
         self._edit_bar.setVisible(False)
         self._find_bar.setVisible(False)
         self._matches, self._match_index = [], -1
         self._save_label.setText("")
+        self._search_hits = []
+        self._search_field.clear()
+        self._search_results.clear()
+        self._search_panel.setVisible(False)
         self._update_edit_actions()
 
     # -- transcript / slide binding ----------------------------------------
@@ -432,7 +541,15 @@ class LectureView(QWidget):
     @property
     def showing_current_slide(self) -> bool:
         """True when the transcript is filtered to one slide."""
-        return not self._tabs.isHidden() and self._tabs.currentIndex() == TAB_SLIDE
+        return (
+            not self._tabs.isHidden()
+            and self._tabs.currentIndex() == TAB_SLIDE
+            and bool(self._appearance_starts)
+        )
+
+    @property
+    def showing_search(self) -> bool:
+        return not self._tabs.isHidden() and self._tabs.currentIndex() == TAB_SEARCH
 
     @property
     def shown_appearance(self) -> SlideAppearance | None:
@@ -453,13 +570,16 @@ class LectureView(QWidget):
         self._alignment = align(segments, appearances)
         self._appearance_starts = [a.start for a in appearances]
 
-        both = bool(segments) and bool(appearances)
-        if both and self._tabs.isHidden():
+        has_slides = bool(appearances)
+        self._tabs.blockSignals(True)
+        if segments and self._tabs.isHidden():
             # The slide-linked view is the point of having both; start there.
-            self._tabs.blockSignals(True)
-            self._tabs.setCurrentIndex(TAB_SLIDE)
-            self._tabs.blockSignals(False)
-        self._tabs.setVisible(both)
+            self._tabs.setCurrentIndex(TAB_SLIDE if has_slides else TAB_FULL)
+        self._tabs.setTabEnabled(TAB_SLIDE, has_slides)
+        if not has_slides and self._tabs.currentIndex() == TAB_SLIDE:
+            self._tabs.setCurrentIndex(TAB_FULL)
+        self._tabs.blockSignals(False)
+        self._tabs.setVisible(bool(segments))
 
         kept = self._project.transcript.index_of(keep_segment) if keep_segment else None
         kept_slide = self._alignment.appearance_for(kept) if kept is not None else None
@@ -488,16 +608,27 @@ class LectureView(QWidget):
         assert self._project is not None
         segments = self._project.transcript.segments
 
+        searching = self.showing_search
+        self._search_panel.setVisible(searching)
+        if searching:
+            for widget in (self._transcript, self._empty_label, self._slide_header,
+                           self._translation_panel, self._transcript_header):
+                widget.setVisible(False)
+            self._run_search()
+            return
+
         if self.showing_current_slide and self._shown >= 0:
             indices = self._alignment.segments_for(self._shown)
             self._transcript.set_segments(tuple(segments[i] for i in indices))
             self._rows = {segment: row for row, segment in enumerate(indices)}
             self._update_slide_header(len(indices))
             self._slides_pane.select_row(self._shown)
+            self._update_translation()
         else:
             self._transcript.set_segments(segments)
             self._rows = {i: i for i in range(len(segments))}
             self._slide_header.setVisible(False)
+            self._translation_panel.setVisible(False)
 
         shown = self._transcript.segment_count
         self._transcript.setVisible(shown > 0)
@@ -524,7 +655,7 @@ class LectureView(QWidget):
             self._slide_header.setVisible(False)
             return
 
-        label = appearance.annotation_label
+        label = self._project.slides.label_for(appearance)
         self._slide_title.setText(
             f"Slide {appearance.appearance_id}" + (f"  ·  {label}" if label else "")
         )
@@ -542,6 +673,26 @@ class LectureView(QWidget):
             self._slide_preview.setText("")
             self._slide_preview.setPixmap(pixmap)
         self._slide_header.setVisible(True)
+
+    def _update_translation(self) -> None:
+        appearance = self.shown_appearance
+        text = (
+            self._project.translations.for_appearance(appearance)
+            if self._project is not None and appearance is not None
+            else None
+        )
+        self._translation_text.setPlainText(text or "")
+        self._translation_panel.setVisible(bool(text))
+
+    @property
+    def shown_translation(self) -> str:
+        if self._translation_panel.isHidden():
+            return ""
+        return self._translation_text.toPlainText()
+
+    def refresh_translations(self) -> None:
+        if self._project is not None:
+            self._show_transcript()
 
     def _preview(self, image: str) -> QPixmap | None:
         if not image or self._project is None:
@@ -577,8 +728,11 @@ class LectureView(QWidget):
 
     @property
     def edit_actions(self) -> list[QAction]:
-        """Undo, redo, find & replace and reset, for the window's Edit menu."""
-        return [self._undo_action, self._redo_action, self._find_action, self._reset_action]
+        """Undo, redo, find & replace, search, tidy and reset, for the Edit menu."""
+        return [
+            self._undo_action, self._redo_action, self._find_action,
+            self._search_action, self._split_action, self._reset_action,
+        ]
 
     def _build_edit_actions(self) -> None:
         self._undo_action = QAction("Undo", self)
@@ -597,6 +751,16 @@ class LectureView(QWidget):
             ]
         )
         self._find_action.triggered.connect(self.open_find)
+        self._search_action = QAction("Search lecture", self)
+        self._search_action.setShortcut(QKeySequence("Ctrl+Shift+F"))
+        self._search_action.triggered.connect(self.open_search)
+        self._split_action = QAction("Split lines at slide changes", self)
+        self._split_action.setToolTip(
+            "Where a slide changes in the middle of a sentence, cut the line at "
+            "the nearest full stop, so each slide keeps whole sentences.\n"
+            "Undo with Ctrl+Z."
+        )
+        self._split_action.triggered.connect(self.split_at_slide_changes)
         self._reset_action = QAction("Reset to original transcription...", self)
         self._reset_action.setToolTip(
             "Discard every correction and go back to the transcript exactly as it "
@@ -607,9 +771,10 @@ class LectureView(QWidget):
         self._undo_button.setDefaultAction(self._undo_action)
         self._redo_button.setDefaultAction(self._redo_action)
         self._find_button.setDefaultAction(self._find_action)
-        self._find_button.setText("Find")
+        # Buttons show the short icon text; menus keep the full action name.
+        self._find_action.setIconText("Find")
         self._reset_button.setDefaultAction(self._reset_action)
-        self._reset_button.setText("Reset")
+        self._reset_action.setIconText("Reset")
         self._update_edit_actions()
 
     def _store(self) -> TranscriptStore | None:
@@ -631,10 +796,14 @@ class LectureView(QWidget):
         )
         self._find_action.setEnabled(bool(store and not store.is_empty))
         self._reset_action.setEnabled(bool(store and not store.is_empty))
+        self._search_action.setEnabled(bool(store and not store.is_empty))
+        self._split_action.setEnabled(
+            bool(store and not store.is_empty and self._appearance_starts)
+        )
 
     def set_save_status(self, text: str, *, error: bool = False) -> None:
         self._save_label.setText(text)
-        self._save_label.setStyleSheet("color: #C0392B;" if error else "color: #888;")
+        set_role(self._save_label, Role.DANGER if error else Role.SUBTLE)
 
     def _edit(
         self,
@@ -739,6 +908,31 @@ class LectureView(QWidget):
         self.transcriptEdited.emit(True)
         self.statusMessage.emit(f"{'Undid' if undo else 'Redid'}: {label.lower()}")
 
+    def split_at_slide_changes(self, *, quiet: bool = False) -> int:
+        """Cut lines a slide change runs through at the nearest sentence end.
+
+        One undoable step. ``quiet`` reports nothing when there was nothing to
+        do, for the automatic pass after slide detection.
+        """
+        project = self._project
+        if project is None or project.transcript.is_empty or not self._appearance_starts:
+            return 0
+        starts = list(self._appearance_starts)
+        done = self._edit(
+            lambda store: store.split_at_slide_changes(starts),
+            None,
+            "",
+            structural=True,
+        )
+        count = done if isinstance(done, int) else 0
+        if count:
+            self.statusMessage.emit(
+                f"{count} line{'s' if count != 1 else ''} split at slide changes"
+            )
+        elif not quiet:
+            self.statusMessage.emit("Every slide change already falls between sentences.")
+        return count
+
     def reset_to_original(self) -> None:
         """Go back to the transcription as Whisper produced it, after asking."""
         project = self._project
@@ -778,6 +972,100 @@ class LectureView(QWidget):
             "corrections back",
             structural=True,
         )
+
+    # -- lecture search (§18) -------------------------------------------------
+
+    def open_search(self, query: str | None = None) -> None:
+        store = self._store()
+        if store is None or store.is_empty:
+            return
+        self._transcript.finish_editing()
+        if query is not None:
+            self._search_field.setText(query)
+        self._tabs.setCurrentIndex(TAB_SEARCH)
+        self._search_field.setFocus()
+        self._search_field.selectAll()
+        self._run_search()
+
+    @property
+    def search_hits(self) -> list[SearchHit]:
+        return list(self._search_hits)
+
+    def _run_search(self) -> None:
+        self._search_timer.stop()
+        if self._project is None:
+            return
+        query = self._search_field.text()
+        self._search_hits = search_lecture(
+            query, self._project.transcript.segments,
+            self._project.slides.appearances, self._project.translations,
+        )
+        if not query.strip():
+            self._search_count.setText("")
+        elif not self._search_hits:
+            self._search_count.setText("No results")
+        else:
+            count = len(self._search_hits)
+            self._search_count.setText(f"{count} result{'s' if count != 1 else ''}")
+        self._search_results.setHtml(
+            "".join(self._hit_html(i, hit) for i, hit in enumerate(self._search_hits))
+        )
+
+    @staticmethod
+    def _hit_html(index: int, hit: SearchHit) -> str:
+        where = []
+        if hit.slide_number is not None:
+            where.append(f"Slide {hit.slide_number}")
+        where.append(format_hms(hit.start))
+        tag = ""
+        if hit.kind == "translation":
+            tag = ' <span style="color:#1E3A8A;">· 한국어 직역</span>'
+        elif hit.in_original_only:
+            tag = ' <span style="color:#B26B00;">· original transcription</span>'
+        parts, cursor = [], 0
+        for start, end in hit.spans:
+            if start < cursor:
+                continue
+            parts.append(html_escape(hit.excerpt[cursor:start]))
+            parts.append(
+                '<b style="background-color:#FFF3B0;">'
+                + html_escape(hit.excerpt[start:end]) + '</b>'
+            )
+            cursor = end
+        parts.append(html_escape(hit.excerpt[cursor:]))
+        return (
+            f'<p style="margin:0 0 10px 0;"><a href="hit:{index}" '
+            'style="text-decoration:none; color:#1F2937;">'
+            f'<span style="color:#6B7280;">{" · ".join(where)}</span>{tag}<br/>'
+            f'{"".join(parts)}</a></p>'
+        )
+
+    def _on_search_link(self, url: QUrl) -> None:
+        text = url.toString()
+        if text.startswith("hit:"):
+            self.open_search_hit(int(text[4:]))
+
+    def open_search_hit(self, index: int) -> None:
+        """Go to a result: its slide, the video at its time, its line selected."""
+        if self._project is None or not 0 <= index < len(self._search_hits):
+            return
+        hit = self._search_hits[index]
+        target = hit.start
+        if hit.appearance_index is not None:
+            appearance = self._project.slides.appearances[hit.appearance_index]
+            # A sentence begun just before its slide appeared still belongs to
+            # that slide; seek inside the slide so playback does not switch away.
+            target = max(hit.start, appearance.start)
+            self._shown = hit.appearance_index
+            self._tabs.setCurrentIndex(TAB_SLIDE)
+        else:
+            self._tabs.setCurrentIndex(TAB_FULL)
+        self._show_transcript(target)
+        self._on_seek_requested(target)
+        if hit.segment_id is not None:
+            row = self._transcript.row_of(hit.segment_id)
+            if row >= 0:
+                self._transcript.select_row(row)
 
     # -- find & replace -------------------------------------------------------
 
@@ -904,7 +1192,10 @@ class LectureView(QWidget):
             store.end_typing()
 
     def set_export_enabled(self, enabled: bool) -> None:
-        for button in (self._export_button, self._quick_export_button, self._ai_request_button):
+        for button in (
+            self._export_button, self._quick_export_button,
+            self._ai_request_button, self._import_translation_button,
+        ):
             button.setEnabled(enabled)
 
     # -- synchronisation (§12) ---------------------------------------------

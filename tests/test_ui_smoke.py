@@ -23,11 +23,34 @@ from PySide6.QtCore import QPoint, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem  # noqa: E402
 
 from lecture_saver.config import Settings  # noqa: E402
+from lecture_saver.core.alignment import align  # noqa: E402
 from lecture_saver.core.models import TranscriptSegment, VideoInfo  # noqa: E402
 from lecture_saver.core.project import Project  # noqa: E402
+from lecture_saver.export.ai_request import ai_request_name  # noqa: E402
 from lecture_saver.ui.lecture_view import LectureView  # noqa: E402
 from lecture_saver.ui.main_window import MainWindow  # noqa: E402
 from lecture_saver.ui.transcript_view import TranscriptView  # noqa: E402
+
+
+def pump_until(predicate, timeout: float = 60.0) -> bool:
+    """Run the UI event loop until ``predicate`` holds, or give up.
+
+    ``time.sleep`` rather than ``QTest.qWait``: work on a worker thread here is
+    pure Python, and a Qt-side busy wait keeps the GIL to itself, starving the
+    very thread the test is waiting for.
+    """
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 @pytest.fixture(scope="session")
@@ -667,10 +690,14 @@ class TestSlideLinkedTranscript:
         assert on_slide == ["If the value is too large, the model diverges."]
         assert on_slide[0] in _texts(view)
 
-    def test_without_slides_there_are_no_tabs(self, qapp, project):
+    def test_without_slides_the_current_slide_tab_is_unavailable(self, qapp, project):
+        from lecture_saver.ui.lecture_view import TAB_FULL, TAB_SLIDE
+
         view = LectureView()
         view.load_project(project)
-        assert not view._tabs.isVisibleTo(view)
+        assert not view._tabs.isTabEnabled(TAB_SLIDE)
+        assert view._tabs.currentIndex() == TAB_FULL
+        assert not view.showing_current_slide
         assert view._transcript.segment_count == 3
 
 
@@ -1173,7 +1200,6 @@ class TestExportDialog:
         assert dialog._slides_note.isVisibleTo(dialog) or not project_with_slides.has_slides
 
     def test_the_background_export_finishes(self, qapp, project_with_slides, tmp_path):
-        from PySide6.QtTest import QTest
 
         from lecture_saver.export.options import ExportFormat
 
@@ -1184,10 +1210,7 @@ class TestExportDialog:
         dialog.exported.connect(results.append)
 
         dialog.start_export()
-        for _ in range(100):
-            if results:
-                break
-            QTest.qWait(50)
+        pump_until(lambda: bool(results))
 
         assert results and results[0].ok
         assert (tmp_path / "elsewhere" / "transcript.txt").is_file()
@@ -1245,13 +1268,9 @@ class TestOneClickExports:
 
     @staticmethod
     def _wait(window):
-        from PySide6.QtTest import QTest
-
-        for _ in range(200):
-            if window.shown_results:
-                return window.shown_results[-1]
-            QTest.qWait(50)
-        raise AssertionError("the export never finished")
+        if not pump_until(lambda: bool(window.shown_results)):
+            raise AssertionError("the export never finished")
+        return window.shown_results[-1]
 
     def test_the_header_offers_all_three_exports(self, qapp, project_with_slides):
         view = LectureView()
@@ -1268,6 +1287,32 @@ class TestOneClickExports:
     def test_shortcuts(self, window):
         assert window._quick_export_action.shortcut().toString() == "Ctrl+E"
         assert window._export_action.shortcut().toString() == "Ctrl+Shift+E"
+
+    def test_the_result_is_handled_on_the_gui_thread(self, window, monkeypatch):
+        """Widget work from a worker thread leaves the window blocked by a
+        dialog Qt never draws - the bug behind an export that looked frozen.
+
+        The thread is recorded in a plain method call, not in the slot itself:
+        replacing a slot changes how Qt resolves the connection, which would
+        hide the very thing under test.
+        """
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QApplication
+
+        threads: list[object] = []
+        results = window.shown_results
+
+        def record(self, result, ai_request):
+            threads.append(QThread.currentThread())
+            results.append((result, ai_request))
+
+        monkeypatch.setattr(MainWindow, "_show_export_result", record)
+
+        window._quick_export()
+        self._wait(window)
+
+        assert threads, "the export never reported back"
+        assert threads[0] is QApplication.instance().thread()
 
     def test_export_pdf_and_markdown_in_one_click(self, window, project_with_slides):
         window._quick_export()
@@ -1293,7 +1338,9 @@ class TestOneClickExports:
 
         assert asked == [], "an English lecture needs no confirmation"
         assert ai_request is True
-        request = project_with_slides.exports_dir / "ai_translation_request.md"
+        request = project_with_slides.exports_dir / ai_request_name(
+            project_with_slides.name, "md"
+        )
         assert request.read_text(encoding="utf-8").startswith("# AI 직역 요청")
 
     def test_a_korean_lecture_asks_first_and_no_means_nothing_is_written(
@@ -1310,7 +1357,9 @@ class TestOneClickExports:
         window._ai_translation_request()
 
         assert window._export_thread is None
-        assert not (project_with_slides.exports_dir / "ai_translation_request.md").exists()
+        assert not (
+            project_with_slides.exports_dir / ai_request_name(project_with_slides.name, "md")
+        ).exists()
 
     def test_without_a_transcript_it_explains_instead(self, window, monkeypatch):
         from PySide6.QtWidgets import QMessageBox
@@ -1322,3 +1371,398 @@ class TestOneClickExports:
         window.project.transcript.replace_all([])
         window._ai_translation_request()
         assert told and window._export_thread is None
+
+
+# --------------------------------------------------------------------------
+# Lecture search (Phase 7)
+# --------------------------------------------------------------------------
+
+
+class TestLectureSearchUI:
+    def test_the_search_tab_lists_results_with_slide_and_time(self, qapp, project_with_slides):
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view.open_search("model")
+
+        assert view.showing_search
+        assert view._search_panel.isVisibleTo(view)
+        assert not view._transcript.isVisibleTo(view)
+        hits = view.search_hits
+        assert [h.slide_number for h in hits] == [2]
+        html = view._search_results.toHtml()
+        assert "Slide 2" in html and "00:00:30" in html
+        assert "1 result" in view._search_count.text()
+
+    def test_opening_a_result_selects_its_slide_line_and_time(self, qapp, project_with_slides):
+        seeks: list[float] = []
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view._player.seek = lambda seconds, **kw: seeks.append(seconds)  # type: ignore[method-assign]
+        view.open_search("러닝레이트")
+
+        view.open_search_hit(0)
+
+        assert view.showing_current_slide
+        assert "Slide 1" in view._slide_title.text()
+        assert seeks == [10.0]
+        row = view._transcript.currentIndex().row()
+        assert view._transcript.model().segment_at_row(row).id == "segment_002"
+
+    def test_results_follow_edits(self, qapp, project_with_slides):
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view.open_search("gradient")
+        assert view.search_hits == []
+
+        view._on_text_edited("segment_001", "Today we learn gradient descent.")
+        view._rebind()
+        assert [h.segment_id for h in view.search_hits] == ["segment_001"]
+
+    def test_search_is_in_the_edit_menu_with_a_shortcut(self, qapp, tmp_path, project_with_slides):
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        try:
+            names = {a.text(): a for a in window._edit_menu.actions()}
+            assert "Search lecture" in names
+            assert names["Search lecture"].shortcut().toString() == "Ctrl+Shift+F"
+        finally:
+            window.close()
+
+
+# --------------------------------------------------------------------------
+# Appearance (theme) and the panel states that go with it
+# --------------------------------------------------------------------------
+
+
+class TestTheme:
+    def test_the_stylesheet_parses(self, qapp):
+        """A typo in the stylesheet makes Qt drop it silently - catch it here."""
+        from PySide6.QtCore import qInstallMessageHandler
+        from PySide6.QtWidgets import QWidget
+
+        from lecture_saver.ui.theme import stylesheet
+
+        messages: list[str] = []
+        previous = qInstallMessageHandler(
+            lambda mode, context, message: messages.append(message)
+        )
+        try:
+            widget = QWidget()
+            widget.setStyleSheet(stylesheet())
+            widget.ensurePolished()
+        finally:
+            qInstallMessageHandler(previous)
+
+        assert not [m for m in messages if "stylesheet" in m.lower()], messages
+
+    def test_a_role_is_a_property_the_stylesheet_can_select_on(self, qapp):
+        from PySide6.QtWidgets import QLabel
+
+        from lecture_saver.ui.theme import Role, set_role
+
+        label = QLabel("3 slides")
+        set_role(label, Role.MUTED)
+        assert label.property("role") == "muted"
+
+        set_role(label, None)
+        assert label.property("role") == ""
+
+    def test_the_window_icon_is_drawn_at_every_size(self, qapp):
+        from lecture_saver.ui.theme import app_icon
+
+        icon = app_icon()
+        assert not icon.isNull()
+        assert not icon.pixmap(32, 32).isNull()
+
+
+class TestTranscribePanelState:
+    def test_the_options_fold_away_once_there_is_a_transcript(self, qapp):
+        from lecture_saver.ui.transcribe_panel import TranscribePanel
+
+        panel = TranscribePanel()
+        assert not panel.is_collapsed
+
+        panel.set_already_transcribed(12)
+        assert panel.is_collapsed
+
+        panel.set_already_transcribed(0)
+        assert not panel.is_collapsed
+
+    def test_an_unfinished_transcription_keeps_the_offer_to_continue_in_view(self, qapp):
+        from lecture_saver.ui.transcribe_panel import TranscribePanel
+
+        panel = TranscribePanel()
+        panel.set_already_transcribed(12)
+        panel.set_resume_point(100.0)
+
+        assert not panel.is_collapsed
+        assert panel._resume_button.isVisibleTo(panel)
+
+    def test_folding_by_hand_is_not_undone_by_a_refresh(self, qapp):
+        from lecture_saver.ui.transcribe_panel import TranscribePanel
+
+        panel = TranscribePanel()
+        panel._on_toggle()
+        assert panel.is_collapsed
+
+        panel.set_already_transcribed(0)
+        assert panel.is_collapsed
+
+    def test_a_project_without_a_transcript_does_not_wear_the_last_one_status(
+        self, qapp, project, tmp_path
+    ):
+        fresh = Project.create(
+            tmp_path / "second",
+            "Lecture 02",
+            VideoInfo(
+                path=str(project.video.path), duration=600.0, width=1280, height=720,
+                fps=30.0, size_bytes=11, container="mov,mp4", video_codec="h264",
+                audio_codec="aac", has_audio=True,
+            ),
+        )
+
+        view = LectureView()
+        view.load_project(project)
+        assert "3 segments" in view.panel._stage_label.text()
+
+        view.load_project(fresh)
+        assert view.panel._stage_label.text() == "Not transcribed yet."
+
+    def test_a_video_that_cannot_be_transcribed_keeps_saying_why(self, qapp, project):
+        from lecture_saver.ui.transcribe_panel import TranscribePanel
+
+        panel = TranscribePanel()
+        panel.set_enabled_for_video(False, "This video has no audio track.")
+        panel.set_already_transcribed(0)
+
+        assert panel._stage_label.text() == "This video has no audio track."
+
+
+class TestTheWindowStaysUsable:
+    """A background job must never be able to wedge the whole window."""
+
+    def test_reading_a_video_does_not_disable_the_window(
+        self, qapp, tmp_path, real_video, monkeypatch
+    ):
+        import shutil
+
+        from lecture_saver.ui import main_window as module
+
+        video = tmp_path / "lecture.mp4"
+        shutil.copy2(real_video, video)
+
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        started: list[object] = []
+        # Do not actually run the probe: the point is the state the window is
+        # left in while one is in flight.
+        monkeypatch.setattr(module, "run_in_thread", lambda worker, thread: started.append(worker))
+        try:
+            window._create_from_video(video)
+
+            assert started, "the probe worker was never started"
+            assert window.isEnabled(), "a pending probe left the window dead to input"
+            assert not window._new_action.isEnabled()
+
+            window._finish_probe()
+            assert window._new_action.isEnabled()
+        finally:
+            window.close()
+
+    def test_a_remembered_geometry_is_kept_on_screen(self, qapp, tmp_path):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QGuiApplication
+
+        available = QGuiApplication.primaryScreen().availableGeometry()
+
+        # Saved on a wider display, or dragged half off the left edge.
+        off_screen = QRect(
+            available.x() - 400, available.y() - 200,
+            available.width() + 600, available.height() + 300,
+        )
+        fitted = MainWindow._fit_to_screen(off_screen)
+
+        assert fitted.width() <= available.width()
+        assert fitted.height() <= available.height()
+        assert available.contains(fitted)
+
+    def test_a_window_that_already_fits_is_left_alone(self, qapp):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QGuiApplication
+
+        available = QGuiApplication.primaryScreen().availableGeometry()
+        rect = QRect(
+            available.x() + 20, available.y() + 20,
+            available.width() // 2, available.height() // 2,
+        )
+
+        assert MainWindow._fit_to_screen(rect) == rect
+
+
+class TestProgressIsVisible:
+    """A long job has to say how far along it is, in words the user can read."""
+
+    def test_the_transcription_panel_shows_a_percentage(self, qapp):
+        from lecture_saver.ui.transcribe_panel import TranscribePanel
+
+        panel = TranscribePanel()
+        panel.begin_run()
+        panel.update_progress("Transcribing lecture", 0.42, "15 min of 36 min")
+
+        assert panel.percent_text == "42%"
+        assert panel._progress_row.isVisibleTo(panel)
+
+        # An unknown fraction must not claim a number.
+        panel.update_progress("Loading the model", -1.0, "")
+        assert panel.percent_text == "..."
+
+        panel.end_run("Done")
+        assert panel.percent_text == ""
+
+    def test_the_slide_panel_shows_a_percentage(self, qapp):
+        from lecture_saver.ui.slide_panel import SlidePanel
+
+        panel = SlidePanel()
+        panel.begin_run()
+        panel.update_progress("Scanning frames", 0.66, "Frame 4,120 of 6,300")
+
+        assert panel.percent_text == "66%"
+
+        panel.end_run("42 slides.")
+        assert panel.percent_text == ""
+
+    def test_a_percentage_out_of_range_is_clamped(self, qapp):
+        from lecture_saver.ui.transcribe_panel import TranscribePanel
+
+        panel = TranscribePanel()
+        panel.update_progress("Transcribing lecture", 1.4, "")
+        assert panel.percent_text == "100%"
+
+    def test_the_window_carries_the_percentage_in_its_title(self, qapp, tmp_path, project):
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        try:
+            window._open_project_at(project.root)
+            plain = window.windowTitle()
+
+            window._set_status_progress("Transcribing lecture", 0.42)
+            assert window.windowTitle().startswith("42% - ")
+            assert window._status_percent.text() == "42%"
+            assert window._status_bar_progress.value() == 42
+
+            window._show_status_progress(False)
+            assert window.windowTitle() == plain
+            assert not window._status_percent.isVisible()
+        finally:
+            window.close()
+
+    def test_an_export_job_reports_each_file_it_writes(self, qapp):
+        from lecture_saver.export.options import ExportFormat
+        from lecture_saver.ui.workers import JobWorker
+
+        seen: list[tuple[str, float]] = []
+
+        def job(report):
+            reporter = MainWindow._export_reporter(report)
+            reporter(ExportFormat.MARKDOWN, 0, 2)
+            reporter(ExportFormat.PDF, 1, 2)
+            return "done"
+
+        worker = JobWorker(job)
+        worker.progress.connect(lambda stage, fraction: seen.append((stage, fraction)))
+        results: list[object] = []
+        worker.finished.connect(results.append)
+        worker.run()
+
+        assert results == ["done"]
+        assert [round(fraction, 2) for _, fraction in seen] == [0.0, 0.5]
+        assert "Markdown" in seen[0][0]
+
+
+class TestSplittingAtSlideChanges:
+    """Lines that a slide change runs through, cut at the sentence end (§10)."""
+
+    @pytest.fixture
+    def project_with_a_straddling_sentence(self, project_with_slides):
+        # The second slide starts at 30 s, in the middle of the second line.
+        project_with_slides.transcript.replace_all(
+            [
+                TranscriptSegment(
+                    id="segment_001", start=0.0, end=20.0,
+                    original_text="Before the change. And the next thought",
+                ),
+                TranscriptSegment(
+                    id="segment_002", start=20.0, end=40.0,
+                    original_text="runs past the slide change. Then a new one starts",
+                ),
+            ],
+            language="en",
+        )
+        project_with_slides.save()
+        return project_with_slides
+
+    def test_the_action_is_offered_in_the_edit_menu(self, qapp, tmp_path, project_with_slides):
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        try:
+            window._open_project_at(project_with_slides.root)
+            names = {action.text() for action in window._edit_menu.actions()}
+            assert "Split lines at slide changes" in names
+        finally:
+            window.close()
+
+    def test_it_cuts_the_line_and_says_how_many(self, qapp, project_with_a_straddling_sentence):
+        view = LectureView()
+        view.load_project(project_with_a_straddling_sentence)
+        messages: list[str] = []
+        view.statusMessage.connect(messages.append)
+
+        assert view.split_at_slide_changes() == 1
+
+        texts = [s.effective_text for s in project_with_a_straddling_sentence.transcript.segments]
+        assert texts[1] == "runs past the slide change."
+        assert texts[2] == "Then a new one starts"
+        assert any("1 line split" in message for message in messages)
+
+    def test_the_two_halves_land_on_the_two_slides(self, qapp, project_with_a_straddling_sentence):
+        view = LectureView()
+        view.load_project(project_with_a_straddling_sentence)
+        view.split_at_slide_changes()
+
+        segments = project_with_a_straddling_sentence.transcript.segments
+        alignment = align(segments, project_with_a_straddling_sentence.slides.appearances)
+        assert alignment.appearance_for(1) == 0
+        assert alignment.appearance_for(2) == 1
+
+    def test_nothing_to_cut_is_said_plainly(self, qapp, project_with_slides):
+        view = LectureView()
+        view.load_project(project_with_slides)
+        messages: list[str] = []
+        view.statusMessage.connect(messages.append)
+
+        assert view.split_at_slide_changes() == 0
+        assert any("already falls between sentences" in message for message in messages)
+
+    def test_detection_tidies_a_transcript_nobody_has_touched(
+        self, qapp, tmp_path, project_with_a_straddling_sentence
+    ):
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        try:
+            window._open_project_at(project_with_a_straddling_sentence.root)
+            window._tidy_sentences_after_detection()
+            # The window reopened the project from disk, so ask its own copy.
+            assert len(window.project.transcript.segments) == 3
+        finally:
+            window.close()
+
+    def test_a_transcript_with_corrections_is_left_alone(
+        self, qapp, tmp_path, project_with_a_straddling_sentence
+    ):
+        project = project_with_a_straddling_sentence
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        try:
+            window._open_project_at(project.root)
+            window.project.transcript.edit_text("segment_001", "Corrected by hand.")
+            before = len(window.project.transcript.segments)
+
+            window._tidy_sentences_after_detection()
+
+            assert len(window.project.transcript.segments) == before
+        finally:
+            window.close()

@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .theme import Role, set_flag, set_role
+
 __all__ = ["FindBar"]
 
 
@@ -38,7 +40,8 @@ class FindBar(QFrame):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        set_flag(self, "rule", "bottom")
 
         self._find = QLineEdit()
         self._find.setPlaceholderText("Find in transcript")
@@ -48,7 +51,7 @@ class FindBar(QFrame):
 
         self._case = QCheckBox("Match case")
         self._count = QLabel("")
-        self._count.setStyleSheet("color: #666;")
+        set_role(self._count, Role.MUTED)
         self._count.setMinimumWidth(60)
 
         self._previous = QToolButton()
@@ -83,8 +86,8 @@ class FindBar(QFrame):
         options_row.addWidget(self._count)
 
         layout = QGridLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setVerticalSpacing(4)
+        layout.setContentsMargins(12, 8, 12, 10)
+        layout.setVerticalSpacing(6)
         layout.addLayout(find_row, 0, 0)
         layout.addLayout(replace_row, 1, 0)
         layout.addLayout(options_row, 2, 0)

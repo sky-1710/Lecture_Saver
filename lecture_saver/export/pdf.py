@@ -8,6 +8,9 @@ The goal is lecture notes rather than a debug dump:
   few lines of transcript still fit beneath it.
 * The transcript follows as paragraphs split at pauses in the speech, and flows
   onto as many pages as it needs.
+* An imported translation that pairs English with Korean replaces the plain
+  transcript, with a light rule between every paragraph so the original and its
+  translation never run together.
 * Korean, English and mixed text all come from one embedded TrueType font. If no
   font that can draw Korean is found the export fails with a clear message
   instead of producing a PDF full of empty boxes.
@@ -206,6 +209,15 @@ def _styles() -> dict[str, object]:
             "stamped", fontName=_REGULAR, fontSize=10.5, leading=16, spaceAfter=4,
             leftIndent=52, firstLineIndent=-52, textColor=colors.HexColor("#1F2937"),
         ),
+        "translation": ParagraphStyle(
+            "translation", fontName=_REGULAR, fontSize=10.5, leading=17,
+            textColor=colors.HexColor("#1E3A8A"),
+        ),
+        # The English an answer repeats above each Korean paragraph.
+        "translation_source": ParagraphStyle(
+            "translation_source", fontName=_REGULAR, fontSize=10.5, leading=17,
+            textColor=colors.HexColor("#1F2937"),
+        ),
         "note": ParagraphStyle(
             "note", fontName=_REGULAR, fontSize=9.5, leading=14, textColor=grey, spaceAfter=6,
         ),
@@ -249,8 +261,15 @@ def _story(
         if block:
             story.append(KeepTogether(block))
 
+        translated = options.translation and bool(section.translation)
+        if translated and section.bilingual:
+            # The pairs carry the English, so it is not printed twice.
+            story += _translation(section, styles)
+            continue
         if options.transcript:
             story += _transcript(section, options, styles, labelled=slides)
+        if translated:
+            story += _translation(section, styles)
 
     return story
 
@@ -299,6 +318,11 @@ def _heading(section: Section) -> str:
 def _picture(section: Section, width: float, height: float, styles: dict[str, object]) -> object:
     from reportlab.platypus import Image, Paragraph
 
+    if section.repeat_of is not None:
+        return Paragraph(
+            f"(Same slide as Slide {section.repeat_of} - its picture is shown there.)",
+            styles["note"],
+        )
     if section.image is None:
         return Paragraph("(No image was captured for this slide.)", styles["note"])
     try:
@@ -341,6 +365,36 @@ def _transcript(
             text = " ".join(s.effective_text.strip() for s in group)
             flowables.append(Paragraph(escape(text), styles["body"]))
     return flowables
+
+
+def _translation(section: Section, styles: dict[str, object]) -> list[object]:
+    """The imported translation under a slide, a rule before every paragraph.
+
+    An answer in the requested shape alternates English and Korean paragraphs;
+    the English keeps the body colour and the Korean the translation colour,
+    with a rule between each so the two never read as one block.
+    """
+    from reportlab.platypus import Paragraph
+
+    flowables: list[object] = []
+    if not section.bilingual:
+        flowables += [_separator(), Paragraph("한국어 직역", styles["label"])]
+    for position, block in enumerate(section.translation_blocks):
+        if section.bilingual or position > 0:
+            flowables.append(_separator())
+        style = styles["translation"] if block.korean else styles["translation_source"]
+        flowables.append(Paragraph(escape(block.text), style))
+    return flowables
+
+
+def _separator() -> object:
+    from reportlab.lib import colors
+    from reportlab.platypus import HRFlowable
+
+    return HRFlowable(
+        width="100%", thickness=0.6, color=colors.HexColor("#C4C9D2"),
+        spaceBefore=10, spaceAfter=10, dash=(3, 2),
+    )
 
 
 def _footer(canvas: object, doc: object, title: str) -> None:

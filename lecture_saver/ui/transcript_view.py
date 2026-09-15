@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from ..core.models import TranscriptSegment
 from ..core.timecode import format_hms
+from . import theme
 
 __all__ = ["TranscriptView", "TranscriptModel"]
 
@@ -55,12 +56,13 @@ ROLE_SEGMENT = Qt.ItemDataRole.UserRole + 2
 ROLE_IS_CURRENT = Qt.ItemDataRole.UserRole + 3
 ROLE_IS_EDITED = Qt.ItemDataRole.UserRole + 4
 
-_PAD_X = 12
-_PAD_Y = 8
+_PAD_X = 14
+_PAD_Y = 9
 _TIME_WIDTH = 74
 _GAP = 10
-_ACCENT = QColor(0x2E, 0x6D, 0xF6)
-_EDITED = QColor(0xB2, 0x6B, 0x00)
+_ACCENT = QColor(theme.ACCENT)
+_ACCENT_SOFT = QColor(theme.ACCENT_SOFT)
+_EDITED = QColor(theme.WARNING_TEXT)
 
 
 class TranscriptModel(QAbstractListModel):
@@ -186,7 +188,9 @@ class SegmentEditor(QPlainTextEdit):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTabChangesFocus(True)
-        self.setStyleSheet("background: #FFFBEA;")
+        self.setStyleSheet(
+            f"background: {theme.EDIT_TINT}; border: none; padding: 0;"
+        )
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
         #: Text when editing began, for Escape.
@@ -285,17 +289,23 @@ class SegmentDelegate(QStyledItemDelegate):
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
         current = bool(index.data(ROLE_IS_CURRENT))
 
+        row = opt.rect.adjusted(4, 2, -4, -2)
         if selected:
-            painter.fillRect(opt.rect, palette.color(QPalette.ColorRole.Highlight).lighter(160))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_ACCENT_SOFT)
+            painter.drawRoundedRect(row, 7, 7)
         elif current:
-            painter.fillRect(opt.rect, QColor(0x2E, 0x6D, 0xF6, 26))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(_ACCENT.red(), _ACCENT.green(), _ACCENT.blue(), 20))
+            painter.drawRoundedRect(row, 7, 7)
 
         if current:
             # A 3 px accent bar makes "where playback is" readable at a glance,
             # even when the user has selected a different row.
-            painter.fillRect(
-                QRect(opt.rect.left(), opt.rect.top() + 4, 3, opt.rect.height() - 8),
-                _ACCENT,
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_ACCENT)
+            painter.drawRoundedRect(
+                QRect(row.left(), row.top() + 4, 3, row.height() - 8), 1.5, 1.5
             )
 
         # Timestamp gutter.

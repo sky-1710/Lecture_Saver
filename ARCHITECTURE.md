@@ -77,12 +77,15 @@ Fully local lecture video → transcript → slide-linked notes.
           models.py              dataclasses + serialisation + schema version
           transcript_store.py    THE single source of truth (§14)
           slides.py              slide / appearance models + detection options
+          alignment.py           which speech belongs to which slide (§10)
+          sentences.py           where a line may be cut so sentences survive
           project.py             project dir layout, create/load/save
         media/
           errors.py
           ffmpeg_tools.py        locate / probe / extract audio (with progress)
         transcription/
           whisper_engine.py      faster-whisper wrapper + device fallback
+          segmentation.py        Whisper words -> lines that end at sentences
           pipeline.py            extract -> transcribe -> persist, resumable
         slides/
           descriptors.py         Pass A: decode once, cache frame descriptors
@@ -92,6 +95,7 @@ Fully local lecture video → transcript → slide-linked notes.
           diagnose.py            --diagnose CLI, replayed from the cache
           pipeline.py            Pass C: capture images, persist, resumable
         ui/
+          theme.py               colours, stylesheet, roles - the whole look
           main_window.py         window, menus, view stack
           start_view.py          new / open project, drag & drop
           lecture_view.py        player + transcript, wired together
@@ -318,14 +322,30 @@ text is structurally identical to a build animation. Both are what the manual
 Pure functions, `core/alignment.py`, no I/O:
 
 ```python
-def assign_segments(segments, appearances) -> list[int | None]   # appearance index
+def snapped_starts(segments, appearances, *, window) -> list[float]  # moved boundaries
+def assign_segments(segments, appearances, *, snap) -> list[int | None]
 def align(segments, appearances) -> Alignment                    # both directions
 ```
 
-Each segment is assigned to the appearance with the **greatest temporal overlap**;
-ties break toward the earlier appearance; zero-overlap segments (past the last slide,
-or in a hand-made gap) attach to the appearance covering or preceding their start, or
-`None` when there are no slides. Both lists are in start order, so the walk is linear.
+Each boundary is first moved to the nearest **break in the speech** within
+`SNAP_WINDOW` (6 s): the end of a sentence beats a pause, and a boundary never moves
+more than half way towards either neighbour, so a short appearance cannot be emptied
+and the order is preserved. A slide changes when the lecturer clicks or starts
+writing - almost never when they finish a sentence - and on a deck shown twice,
+before and after annotation, that lands mid-sentence at nearly every change.
+
+Each segment is then assigned to the appearance with the **greatest temporal overlap**
+of those snapped intervals; ties break toward the earlier appearance; zero-overlap
+segments (past the last slide, or in a hand-made gap) attach to the appearance covering
+or preceding their start, or `None` when there are no slides. Both lists are in start
+order, so the walk is linear.
+
+Only the reading moves: slide times themselves are left exactly as detected, so seeking
+and the printed time ranges stay true to the video. Where the sentence end is *inside* a
+line - Whisper packs several sentences into one segment - `core/sentences.py` finds the
+cut and `TranscriptStore.split_at_slide_changes()` applies it as one undoable edit,
+automatically after detection on an untouched transcript and from **Edit → Split lines
+at slide changes** at any time.
 
 The link is **derived, never authoritative**. `Project.align()` recomputes it from the
 times and writes the result as `slide_id` on each segment (only when something

@@ -31,6 +31,8 @@ from pathlib import Path
 from .atomic_io import read_json, write_json_atomic
 from .edit_history import EditHistory, copy_segments
 from .models import Transcript, TranscriptSegment, make_segment_id
+from .sentences import WINDOW as SENTENCE_WINDOW
+from .sentences import cuts_for_boundaries
 
 __all__ = ["TextMatch", "TranscriptEditError", "TranscriptStore"]
 
@@ -325,7 +327,52 @@ class TranscriptStore:
         matching point too, snapped to a word boundary.
         """
         index = self._require_index(segment_id)
-        segment = self._transcript.segments[index]
+        left, right = self._split_parts(self._transcript.segments[index], offset)
+        self._history.record("Split segment", self._transcript.segments)
+        self._transcript.segments[index : index + 1] = [left, right]
+        self._changed()
+        return left, right
+
+    def split_at_slide_changes(
+        self, boundaries: Sequence[float], *, window: float = SENTENCE_WINDOW
+    ) -> int:
+        """Cut every line a slide change runs through at the nearest sentence end.
+
+        One undoable step for the lot. Returns how many lines were split; the
+        transcript is left alone when there is nothing worth cutting.
+        """
+        cuts = cuts_for_boundaries(self._transcript.segments, boundaries, window=window)
+        if not cuts:
+            return 0
+
+        positions: list[tuple[int, int]] = []
+        for segment_id, offset in cuts:
+            try:
+                positions.append((self._require_index(segment_id), offset))
+            except TranscriptEditError:  # pragma: no cover - ids come from us
+                continue
+
+        self._history.record("Split at slide changes", self._transcript.segments)
+        done = 0
+        # Late first, so the earlier indices stay valid as the list grows.
+        for index, offset in sorted(positions, reverse=True):
+            try:
+                left, right = self._split_parts(self._transcript.segments[index], offset)
+            except TranscriptEditError:
+                continue
+            self._transcript.segments[index : index + 1] = [left, right]
+            done += 1
+
+        if not done:
+            self._history.discard_last()
+            return 0
+        self._changed()
+        return done
+
+    def _split_parts(
+        self, segment: TranscriptSegment, offset: int
+    ) -> tuple[TranscriptSegment, TranscriptSegment]:
+        """The two halves a split would produce, without touching the store."""
         text = segment.effective_text
         left_text, right_text = text[:offset].rstrip(), text[offset:].lstrip()
         if not 0 < offset < len(text) or not left_text or not right_text:
@@ -353,10 +400,6 @@ class TranscriptStore:
         )
         _set_text(left, left_text)
         _set_text(right, right_text)
-
-        self._history.record("Split segment", self._transcript.segments)
-        self._transcript.segments[index : index + 1] = [left, right]
-        self._changed()
         return left, right
 
     # -- reset to the original transcription -------------------------------

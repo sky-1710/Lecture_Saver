@@ -15,6 +15,8 @@ evidence rejected a transition, and the groups match the paths in the detector:
     Suppression of handwriting, highlighter and pen strokes.
 ``annotation_snapshots``
     Saving a heavily annotated slide as a clean and an annotated version.
+``duplicate_slides``
+    Recognising a slide the professor returned to.
 ``busy_region_mask``
     Ignoring webcam overlays, clocks and embedded video.
 ``timing``
@@ -34,6 +36,7 @@ __all__ = [
     "StrongGlobalOptions",
     "AnnotationFilterOptions",
     "AnnotationSnapshotOptions",
+    "DuplicateSlideOptions",
     "BusyRegionOptions",
     "TimingOptions",
     "ImageOptions",
@@ -214,6 +217,25 @@ class AnnotationSnapshotOptions:
 
 
 @dataclass
+class DuplicateSlideOptions:
+    """When a later appearance is the same slide as an earlier one (§9).
+
+    Measured on a real lecture: genuine returns differed in 0.10-0.30 % of
+    ink pixels with 0.99 overlap; the closest different captures differed in
+    1.5 %, and two alike sparse title slides overlapped only 0.58.
+    """
+
+    enabled: bool = True
+    #: Share of analysis pixels whose ink may differ.
+    max_ink_difference: float = 0.006
+    #: Intersection over union of the two ink masks. Keeps near-empty slides
+    #: that differ in a title from being merged.
+    min_ink_overlap: float = 0.9
+    #: Bits of the 64-bit perceptual hash that may differ; a cheap first check.
+    max_hash_distance: int = 10
+
+
+@dataclass
 class BusyRegionOptions:
     """Ignoring regions that change constantly: webcams, clocks, video."""
 
@@ -284,6 +306,7 @@ class SlideDetectionOptions:
     annotation_snapshots: AnnotationSnapshotOptions = field(
         default_factory=AnnotationSnapshotOptions
     )
+    duplicate_slides: DuplicateSlideOptions = field(default_factory=DuplicateSlideOptions)
     busy_region_mask: BusyRegionOptions = field(default_factory=BusyRegionOptions)
     timing: TimingOptions = field(default_factory=TimingOptions)
     image: ImageOptions = field(default_factory=ImageOptions)
@@ -338,6 +361,7 @@ _GROUPS = (
     "strong_global_transition",
     "annotation_filter",
     "annotation_snapshots",
+    "duplicate_slides",
     "busy_region_mask",
     "timing",
     "image",

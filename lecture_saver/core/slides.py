@@ -36,6 +36,7 @@ __all__ = [
     "merge_with_previous",
     "split_at",
     "move_boundary",
+    "separate_slide",
     "set_slide_image",
 ]
 
@@ -199,6 +200,25 @@ class SlideSet:
 
     def slide_for(self, appearance: SlideAppearance) -> Slide | None:
         return self.slide(appearance.slide_id)
+
+    def repeat_of(self, appearance: SlideAppearance) -> SlideAppearance | None:
+        """The earlier appearance of the same slide, if this is a return to it."""
+        for other in self.appearances:
+            if other.start >= appearance.start:
+                break
+            if other.slide_id == appearance.slide_id and other is not appearance:
+                return other
+        return None
+
+    def label_for(self, appearance: SlideAppearance) -> str:
+        """Short description next to the number: notes state, and a return."""
+        parts = []
+        if appearance.annotation_label:
+            parts.append(appearance.annotation_label)
+        earlier = self.repeat_of(appearance)
+        if earlier is not None:
+            parts.append(f"Same as Slide {earlier.appearance_id}")
+        return " · ".join(parts)
 
     def appearance_at(self, seconds: float) -> SlideAppearance | None:
         """The appearance covering ``seconds``, if any."""
@@ -387,6 +407,27 @@ def move_boundary(
     current.manually_modified = True
     slide_set.manually_edited = True
     return current
+
+
+def separate_slide(slide_set: SlideSet, appearance_id: int, image: str = "") -> SlideAppearance:
+    """Undo a wrong "same slide" match: give the appearance its own slide.
+
+    The caller captures a picture for it, as for a hand-made boundary.
+    """
+    appearance = slide_set.appearances[_index_of(slide_set, appearance_id)]
+    if slide_set.repeat_of(appearance) is None:
+        raise SlideEditError(
+            f"Slide {appearance_id} is not marked as the same slide as an earlier one."
+        )
+    new_slide_id = max(
+        max((s.slide_id for s in slide_set.slides), default=0),
+        max(a.slide_id for a in slide_set.appearances),
+    ) + 1
+    appearance.slide_id = new_slide_id
+    appearance.manually_modified = True
+    slide_set.slides.append(Slide(slide_id=new_slide_id, image=image))
+    slide_set.manually_edited = True
+    return appearance
 
 
 def set_slide_image(slide_set: SlideSet, slide_id: int, image: str, fingerprint: str = "") -> None:

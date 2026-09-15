@@ -390,11 +390,22 @@ class TestAiTranslationRequest:
         assert "learning rate를 보시면" in lecture
         assert TRANSLATION_REQUEST.strip() in text
 
-    def test_the_request_asks_for_every_sentence_and_keeps_terms_in_english(self):
+    def test_the_request_asks_for_english_then_korean_paragraph_by_paragraph(self):
         from lecture_saver.export.ai_request import TRANSLATION_REQUEST
 
-        for rule in ("빠짐없이 한국어 문장으로 번역", "전공 용어", "요약하거나",
-                     "learning rate가 너무 크면"):
+        for rule in (
+            "영어 원문 한 문단 → `---` → 한국어 직역 한 문단",  # the shape asked for
+            "`---` 한 줄로 구분한 뒤",                          # English and Korean apart
+            "---\n## Slide 1\n---\n",                          # the slide heading too
+            "영어를 지우면 안 됩니다",                          # the English is kept
+            "모든 문단을 빠짐없이",                              # nothing is dropped
+            "문단을 합치거나 나누지 마세요",                     # the grouping is kept
+            "전공 용어는 영어로",
+            "요약하거나",
+            "learning rate가 너무 크면",                         # the worked example
+            "Markdown(.md) 파일",                                # comes back into the app
+            "PDF 파일",                                          # and one to read
+        ):
             assert rule in TRANSLATION_REQUEST
 
     def test_the_lecture_part_has_paragraphs_not_timestamps(self, document):
@@ -404,20 +415,18 @@ class TestAiTranslationRequest:
 
     @needs_korean_font
     def test_both_files_are_written_with_the_request_first(self, document, tmp_path):
-        from lecture_saver.export.ai_request import (
-            AI_REQUEST_MARKDOWN,
-            AI_REQUEST_PDF,
-            run_ai_request_export,
-        )
+        from lecture_saver.export.ai_request import ai_request_name, run_ai_request_export
 
+        markdown = ai_request_name(document.title, "md")
+        pdf = ai_request_name(document.title, "pdf")
         result = run_ai_request_export(document, PdfOptions(), tmp_path)
 
         assert result.ok
-        assert sorted(p.name for p in result.written) == sorted(
-            [AI_REQUEST_MARKDOWN, AI_REQUEST_PDF]
-        )
-        pages, _ = _pdf_text(tmp_path / AI_REQUEST_PDF)
-        first, rest = _pdf_pages(tmp_path / AI_REQUEST_PDF)
+        # The lecture's own name leads, so a folder of requests stays readable.
+        assert sorted(p.name for p in result.written) == sorted([markdown, pdf])
+        assert markdown.endswith("_ai_translation.md")
+        pages, _ = _pdf_text(tmp_path / pdf)
+        first, rest = _pdf_pages(tmp_path / pdf)
         assert "AI 직역 요청" in first
         # Only the lecture's own content proves where the notes start: the
         # request itself mentions slides and labels.
@@ -430,10 +439,10 @@ class TestAiTranslationRequest:
     def test_the_pdf_keeps_the_transcript_even_if_slides_only_was_chosen(
         self, document, tmp_path
     ):
-        from lecture_saver.export.ai_request import AI_REQUEST_PDF, run_ai_request_export
+        from lecture_saver.export.ai_request import ai_request_name, run_ai_request_export
 
         run_ai_request_export(document, PDF_PRESETS["Slides Only"], tmp_path)
-        _, rest = _pdf_pages(tmp_path / AI_REQUEST_PDF)
+        _, rest = _pdf_pages(tmp_path / ai_request_name(document.title, "pdf"))
         assert "learning rate" in rest
 
     def test_without_a_transcript_nothing_is_written(self, project, tmp_path):
@@ -455,3 +464,149 @@ def _pdf_pages(path: Path) -> tuple[str, str]:
     texts = [pdf.getAllText(page).text() for page in range(pdf.pageCount())]
     pdf.close()
     return texts[0], "\n".join(texts[1:])
+
+
+def test_the_ai_request_export_reports_each_file(document, tmp_path, monkeypatch):
+    """The window draws a progress bar from these calls, so they must arrive."""
+    from lecture_saver.export.ai_request import run_ai_request_export
+
+    seen = []
+
+    # The PDF needs a Korean-capable font; the request is about the callbacks.
+    monkeypatch.setattr(
+        "lecture_saver.export.ai_request.write_pdf",
+        lambda *args, **kwargs: Path(args[2]).write_bytes(b"%PDF-1.4\n"),
+    )
+
+    run_ai_request_export(
+        document, PdfOptions(), tmp_path,
+        on_progress=lambda fmt, position, total: seen.append((fmt, position, total)),
+    )
+
+    assert [(position, total) for _, position, total in seen] == [(0, 2), (1, 2), (2, 2)]
+    assert seen[0][0] is ExportFormat.MARKDOWN
+
+
+class TestAiRequestFileNames:
+    """The lecture's own name leads, so a folder of requests stays readable."""
+
+    def test_the_lecture_name_comes_first(self):
+        from lecture_saver.export.ai_request import ai_request_name
+
+        assert ai_request_name("OS02-LimitedDirectExecution", "md") == (
+            "OS02-LimitedDirectExecution_ai_translation.md"
+        )
+        assert ai_request_name("OS02-LimitedDirectExecution", "pdf") == (
+            "OS02-LimitedDirectExecution_ai_translation.pdf"
+        )
+
+    def test_spaces_become_underscores(self):
+        from lecture_saver.export.ai_request import ai_request_name
+
+        assert ai_request_name("Machine Learning 04", "md") == (
+            "Machine_Learning_04_ai_translation.md"
+        )
+
+    def test_korean_names_are_kept(self):
+        from lecture_saver.export.ai_request import ai_request_name
+
+        assert ai_request_name("9주차_상표권", "md") == "9주차_상표권_ai_translation.md"
+
+    def test_characters_a_file_name_cannot_hold_are_replaced(self):
+        from lecture_saver.export.ai_request import ai_request_name
+
+        messy = r'a/b\c:d*e?f"g<h>i|j'
+        assert ai_request_name(messy, "md") == "a_b_c_d_e_f_g_h_i_j_ai_translation.md"
+
+    def test_a_name_with_nothing_usable_still_makes_a_file(self):
+        from lecture_saver.export.ai_request import ai_request_name
+
+        assert ai_request_name("   ", "md") == "lecture_ai_translation.md"
+        assert ai_request_name("...", "md") == "lecture_ai_translation.md"
+
+    def test_a_dotted_extension_is_accepted(self):
+        from lecture_saver.export.ai_request import ai_request_name
+
+        assert ai_request_name("Lecture", ".md") == "Lecture_ai_translation.md"
+
+
+class TestTranslationInThePdf:
+    """An imported answer, English paragraph then Korean, under each slide."""
+
+    #: The shape the request asks for: English, a blank line, then Korean.
+    ANSWER = (
+        "## Slide 1\n"
+        "Today we look at the basics.\n\n"
+        "오늘은 기본을 봅니다.\n\n"
+        "## Slide 2\n"
+        "If this value is too large, the model diverges.\n\n"
+        "이 값이 너무 크면 모델이 발산합니다.\n"
+    )
+
+    @needs_korean_font
+    def test_both_languages_are_in_the_notes_under_their_slides(self, project, tmp_path):
+        result = project.import_translation(self.ANSWER, source="answer.md")
+        assert len(result.matched) == 2
+
+        pdf = tmp_path / "notes.pdf"
+        write_pdf(build_document(project), PdfOptions(transcript=False, translation=True), pdf)
+        _, text = _pdf_text(pdf)
+
+        for line in ("Today we look at the basics.", "오늘은 기본을 봅니다.",
+                     "If this value is too large, the model diverges.",
+                     "이 값이 너무 크면 모델이 발산합니다."):
+            assert line in text
+        # English comes first, its Korean right after, and only once.
+        assert text.index("Today we look") < text.index("오늘은 기본을")
+        assert text.count("Today we look at the basics.") == 1
+        assert "원문 · 한국어 직역" not in text
+
+    @needs_korean_font
+    def test_the_pairs_replace_the_plain_transcript(self, project, tmp_path):
+        project.import_translation(self.ANSWER, source="answer.md")
+
+        pdf = tmp_path / "notes.pdf"
+        write_pdf(build_document(project), PdfOptions(), pdf)
+        _, text = _pdf_text(pdf)
+        assert "If this value is too large, the model diverges." in text
+        assert text.count("오늘은 기본을 봅니다.") == 1
+        assert "Transcript" not in text
+
+    @needs_korean_font
+    def test_a_korean_only_translation_keeps_its_plain_label(self, project, tmp_path):
+        project.import_translation("## Slide 1\n오늘은 기본을 봅니다.\n", source="answer.md")
+
+        pdf = tmp_path / "notes.pdf"
+        write_pdf(build_document(project), PdfOptions(transcript=False, translation=True), pdf)
+        _, text = _pdf_text(pdf)
+
+        assert "한국어 직역" in text
+        assert "원문 · 한국어 직역" not in text
+
+    def test_every_english_paragraph_keeps_its_korean_one(self, project):
+        import re
+
+        hangul = re.compile(r"[\uac00-\ud7a3]")
+        project.import_translation(self.ANSWER, source="answer.md")
+        sections = [s for s in build_document(project).sections if s.translation]
+
+        assert len(sections) == 2
+        for section in sections:
+            lines = [line for line in section.translation.splitlines() if line.strip()]
+            english = [line for line in lines if not hangul.search(line)]
+            korean = [line for line in lines if hangul.search(line)]
+            assert len(english) == len(korean) == 1
+            # Stored as two paragraphs, so a Markdown viewer shows them apart.
+            assert "\n\n" in section.translation
+
+    @needs_korean_font
+    def test_an_answer_without_the_blank_line_still_reads_the_same(self, project, tmp_path):
+        """Answers made with the earlier request put Korean on the very next line."""
+        tight = self.ANSWER.replace(".\n\n오늘", ".\n오늘").replace(".\n\n이 값", ".\n이 값")
+        project.import_translation(tight, source="answer.md")
+
+        pdf = tmp_path / "notes.pdf"
+        write_pdf(build_document(project), PdfOptions(transcript=False, translation=True), pdf)
+        _, text = _pdf_text(pdf)
+        assert "오늘은 기본을 봅니다." in text
+        assert text.index("Today we look") < text.index("오늘은 기본을")

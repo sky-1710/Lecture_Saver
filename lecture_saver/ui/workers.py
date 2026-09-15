@@ -16,7 +16,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from ..core.models import VideoInfo
 from ..core.slides import SlideDetectionOptions
@@ -31,9 +31,13 @@ from ..transcription.whisper_engine import WhisperOptions
 
 log = logging.getLogger(__name__)
 
+#: What a :class:`JobWorker` job may call to say how far along it is.
+ProgressReport = Callable[[str, float], None]
+
 __all__ = [
     "ExportWorker",
     "JobWorker",
+    "ProgressReport",
     "ProbeWorker",
     "SlideDetectionWorker",
     "TranscriptionWorker",
@@ -58,6 +62,7 @@ class ProbeWorker(QObject):
         super().__init__()
         self._path = video_path
 
+    @Slot()
     def run(self) -> None:
         try:
             info: VideoInfo = probe_video(self._path)
@@ -79,10 +84,13 @@ class TranscriptionWorker(QObject):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, project: object, options: WhisperOptions) -> None:
+    def __init__(
+        self, project: object, options: WhisperOptions, *, resume: bool = False
+    ) -> None:
         super().__init__()
         self._project = project
         self._options = options
+        self._resume = resume
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -92,6 +100,7 @@ class TranscriptionWorker(QObject):
     def is_cancelled(self) -> bool:
         return self._cancel.is_set()
 
+    @Slot()
     def run(self) -> None:
         def on_update(update: PipelineUpdate) -> None:
             fraction = -1.0 if update.fraction is None else float(update.fraction)
@@ -102,6 +111,7 @@ class TranscriptionWorker(QObject):
             self._options,
             on_update=on_update,
             should_cancel=self._cancel.is_set,
+            resume=self._resume,
         )
         try:
             result = pipeline.run()
@@ -136,6 +146,7 @@ class SlideDetectionWorker(QObject):
     def is_cancelled(self) -> bool:
         return self._cancel.is_set()
 
+    @Slot()
     def run(self) -> None:
         def on_update(update: SlideUpdate) -> None:
             fraction = -1.0 if update.fraction is None else float(update.fraction)
@@ -177,6 +188,7 @@ class ExportWorker(QObject):
         self._settings = settings
         self._output_dir = output_dir
 
+    @Slot()
     def run(self) -> None:
         def on_progress(export_format: ExportFormat, position: int, total: int) -> None:
             self.progress.emit(export_format.label, position, total)
@@ -190,20 +202,26 @@ class ExportWorker(QObject):
 class JobWorker(QObject):
     """Runs one callable on a background thread and hands back its result.
 
-    For short jobs that report nothing along the way, such as the one-click
-    exports. The callable must not touch widgets or the live project: give it a
-    snapshot.
+    The job is handed a ``report(stage, fraction)`` callable it may use to say
+    how far along it is; the window turns that into a progress bar. A job that
+    has nothing to report simply ignores it. The callable must not touch
+    widgets or the live project: give it a snapshot.
     """
 
+    progress = Signal(str, float)  # stage label, fraction (-1 = unknown)
     finished = Signal(object)
 
-    def __init__(self, job: Callable[[], object]) -> None:
+    def __init__(self, job: Callable[[ProgressReport], object]) -> None:
         super().__init__()
         self._job = job
 
+    def _report(self, stage: str, fraction: float = -1.0) -> None:
+        self.progress.emit(stage, fraction)
+
+    @Slot()
     def run(self) -> None:
         try:
-            result = self._job()
+            result = self._job(self._report)
         except Exception as exc:  # noqa: BLE001 - a worker must never crash the app
             log.exception("Background job failed")
             result = exc

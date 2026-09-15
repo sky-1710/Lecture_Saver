@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..core.models import StageStatus, TranscriptSegment, make_segment_id
 from ..core.project import Project, ProjectError
+from ..core.timecode import format_hms
 from ..media.errors import Cancelled, MediaError, MissingVideoFileError, NoAudioTrackError
 from ..media.ffmpeg_tools import extract_audio
+from .resume import next_segment_number, resume_point
 from .whisper_engine import (
     ModelLoadError,
     TranscriptionResult,
@@ -80,9 +82,12 @@ class TranscriptionPipeline:
         *,
         on_update: UpdateCallback | None = None,
         should_cancel: CancelCheck | None = None,
+        resume: bool = False,
     ) -> None:
         self.project = project
         self.options = options
+        #: Continue an unfinished transcription instead of starting over.
+        self.resume = resume
         self._on_update = on_update
         self._should_cancel = should_cancel or (lambda: False)
 
@@ -163,6 +168,12 @@ class TranscriptionPipeline:
 
     def _transcribe(self) -> TranscriptionResult:
         self._check_cancel()
+        point = resume_point(self.project) if self.resume else None
+        if self.resume and point is None:
+            raise PipelineError(
+                "There is nothing left to continue: this lecture's transcription "
+                "is already complete."
+            )
         self.project.set_stage("transcription", StageStatus.RUNNING)
 
         engine = WhisperEngine(self.options)
@@ -170,9 +181,16 @@ class TranscriptionPipeline:
         engine.load(on_status=lambda msg: self._emit(STAGE_TRANSCRIBE, None, msg))
 
         self._check_cancel()
-        self._emit(STAGE_TRANSCRIBE, 0.0, "Transcribing...")
+        if point is not None:
+            self._emit(
+                STAGE_TRANSCRIBE, 0.0, f"Continuing from {format_hms(point.start)}..."
+            )
+        else:
+            self._emit(STAGE_TRANSCRIBE, 0.0, "Transcribing...")
 
-        collected: list[TranscriptSegment] = []
+        collected: list[TranscriptSegment] = [replace(s) for s in point.keep] if point else []
+        first_number = next_segment_number(collected)
+        kept = len(collected)
 
         def on_segment(raw: object, fraction: float) -> None:
             start = getattr(raw, "start", 0.0)
@@ -180,7 +198,7 @@ class TranscriptionPipeline:
             text = getattr(raw, "text", "")
             collected.append(
                 TranscriptSegment(
-                    id=make_segment_id(len(collected) + 1),
+                    id=make_segment_id(first_number + len(collected) - kept),
                     start=float(start),
                     end=float(end),
                     original_text=str(text),
@@ -195,9 +213,11 @@ class TranscriptionPipeline:
             )
 
         try:
+            extra = {"start_at": point.start} if point is not None else {}
             result = engine.transcribe(
                 self.project.audio_file,
                 duration=self.project.video.duration,
+                **extra,
                 on_segment=on_segment,
                 should_cancel=self._should_cancel,
             )

@@ -40,5 +40,5 @@ disallow_untyped_defs = true
 # PySide6's stubs declare QStyleOptionViewItem without its C++ member variables
 # (rect / font / palette / state). They all exist at runtime - verified - but
 # mypy cannot see them, so attribute checking is disabled for this module only.
-module = "lecture_saver.ui.transcript_view"
+module = ["lecture_saver.ui.transcript_view", "lecture_saver.ui.slide_panel"]
 disable_error_code = ["attr-defined"]

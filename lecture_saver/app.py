@@ -17,14 +17,56 @@ os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
 from .config import APP_DISPLAY_NAME, APP_NAME, Settings  # noqa: E402
 from .logging_setup import setup_logging  # noqa: E402
 
+#: How Windows groups the running window on the taskbar. Without it the window
+#: is filed under ``pythonw.exe``, with Python's icon instead of this one.
+APP_USER_MODEL_ID = "LectureSaver.App"
+
+
+def ensure_output_streams() -> None:
+    """Give a console-less start somewhere to write.
+
+    Started from a shortcut through ``pythonw.exe`` there is no console, and
+    ``sys.stdout``/``sys.stderr`` are ``None``. Anything that writes to them -
+    the progress bar of a first model download, a library warning - would then
+    crash the app. They are pointed at the null device instead; the log file
+    still receives everything worth keeping.
+    """
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+
+
+def _set_taskbar_identity() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:  # noqa: BLE001 - cosmetic; never worth failing a start over
+        pass
+
 
 def run(argv: list[str] | None = None) -> int:
+    ensure_output_streams()
     argv = list(sys.argv if argv is None else argv)
     verbose = "--verbose" in argv
     setup_logging(verbose=verbose)
 
     if "--selftest" in argv:
         return selftest()
+
+    if "--create-shortcuts" in argv or "--remove-shortcuts" in argv:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QGuiApplication
+
+        from .shortcuts import create_shortcuts, remove_shortcuts
+
+        _app = QGuiApplication.instance() or QGuiApplication(argv)  # noqa: F841 - icon drawing
+        if "--remove-shortcuts" in argv:
+            return remove_shortcuts()
+        return create_shortcuts()
 
     if "--diagnose" in argv:
         from .slides.diagnose import diagnose
@@ -35,11 +77,14 @@ def run(argv: list[str] | None = None) -> int:
     from PySide6.QtWidgets import QApplication
 
     from .ui.main_window import MainWindow
+    from .ui.theme import apply_theme
 
+    _set_taskbar_identity()
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_DISPLAY_NAME)
     app.setOrganizationName(APP_NAME)
+    apply_theme(app)
 
     settings = Settings()
     window = MainWindow(settings)

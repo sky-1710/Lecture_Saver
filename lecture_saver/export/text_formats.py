@@ -53,35 +53,98 @@ def to_txt(document: LectureDocument, *, timestamps: bool = True) -> str:
 
 
 def to_markdown(
-    document: LectureDocument, *, timestamps: bool = True, output_dir: Path | None = None
+    document: LectureDocument,
+    *,
+    timestamps: bool = True,
+    output_dir: Path | None = None,
+    translation: bool = True,
 ) -> str:
-    """Slide-by-slide notes in Markdown, with images linked relative to the file."""
+    """Slide-by-slide notes in Markdown, with images linked relative to the file.
+
+    When a translation is included, every slide is laid out with ``---`` rules
+    between its heading and each paragraph, so each English paragraph and its
+    Korean translation stand apart::
+
+        ---
+        ## Slide 1
+        ---
+        English paragraph
+        ---
+        Korean translation
+        ---
+    """
     lines = [f"# {_md_escape(document.title)}", ""]
     meta = [document.video_name]
     if document.duration:
         meta.append(format_duration(document.duration))
     lines += [f"*{_md_escape(' · '.join(meta))}*", ""]
 
+    separated = translation and document.has_translation
     for section in document.sections:
+        if separated:
+            lines += _separated_section(document, section, timestamps, output_dir)
+            continue
         if document.has_slides:
-            lines += [f"## {_section_title(section)}", ""]
-            lines += [f"`{format_hms(section.start)} – {format_hms(section.end)}`", ""]
-            if section.image is not None:
-                target = _relative(section.image, output_dir)
-                if any(char in target for char in " ()"):
-                    target = f"<{target}>"
-                lines += [f"![Slide {section.number}]({target})", ""]
-        segments = section.spoken
-        if timestamps:
-            for segment in segments:
-                lines += [f"**[{format_hms(segment.start)}]** {_md_escape(_text(segment))}", ""]
-        else:
-            for group in paragraphs(segments):
-                lines += [_md_escape(" ".join(_text(s) for s in group)), ""]
-        if document.has_slides and not segments:
-            lines += ["*Nothing was said while this slide was on screen.*", ""]
+            lines += _md_slide_header(section, output_dir)
+        lines += _md_transcript(document, section, timestamps)
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+#: A thematic break. Blank lines around it keep the paragraph above from being
+#: read as a heading.
+_RULE = ["---", ""]
+
+
+def _md_slide_header(section: Section, output_dir: Path | None) -> list[str]:
+    lines = [f"## {_section_title(section)}", ""]
+    lines += [f"`{format_hms(section.start)} – {format_hms(section.end)}`", ""]
+    if section.image is not None:
+        target = _relative(section.image, output_dir)
+        if any(char in target for char in " ()"):
+            target = f"<{target}>"
+        lines += [f"![Slide {section.number}]({target})", ""]
+    return lines
+
+
+def _md_transcript(document: LectureDocument, section: Section, timestamps: bool) -> list[str]:
+    """The slide's speech; with ``timestamps`` one entry per segment."""
+    return [line for block in _md_transcript_blocks(document, section, timestamps)
+            for line in (block, "")]
+
+
+def _md_transcript_blocks(
+    document: LectureDocument, section: Section, timestamps: bool
+) -> list[str]:
+    segments = section.spoken
+    if document.has_slides and not segments:
+        return ["*Nothing was said while this slide was on screen.*"]
+    if timestamps:
+        return [f"**[{format_hms(s.start)}]** {_md_escape(_text(s))}" for s in segments]
+    return [_md_escape(" ".join(_text(s) for s in group)) for group in paragraphs(segments)]
+
+
+def _separated_section(
+    document: LectureDocument, section: Section, timestamps: bool, output_dir: Path | None
+) -> list[str]:
+    lines = list(_RULE)
+    if document.has_slides:
+        lines += _md_slide_header(section, output_dir) + _RULE
+
+    if section.bilingual:
+        # The answer already pairs the English with its Korean.
+        units = [block.text for block in section.translation_blocks]
+    else:
+        spoken_blocks = _md_transcript_blocks(document, section, timestamps)
+        if timestamps and section.spoken:
+            # Timestamped lines stay together as one block of speech.
+            spoken_blocks = ["\n\n".join(spoken_blocks)]
+        units = spoken_blocks + [b.text for b in section.translation_blocks]
+
+    for unit in units:
+        lines += [unit, ""] + _RULE
+    lines.append("")
+    return lines
 
 
 def _md_escape(text: str) -> str:
@@ -168,6 +231,8 @@ def to_json(document: LectureDocument, *, exported_at: datetime | None = None) -
                 "end": round(section.end, 3),
                 "image": section.image_ref or None,
                 "transcript": [_segment_json(s) for s in section.segments],
+                "translation": section.translation or None,
+                "same_slide_as": section.repeat_of,
             }
             for section in document.sections
         ]

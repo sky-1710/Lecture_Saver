@@ -159,6 +159,7 @@ class TestDetectionOptions:
         "strong_global_transition",
         "annotation_filter",
         "annotation_snapshots",
+        "duplicate_slides",
         "busy_region_mask",
         "timing",
         "image",
