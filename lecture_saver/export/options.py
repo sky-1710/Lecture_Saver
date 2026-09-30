@@ -6,8 +6,10 @@ so the choices made on the export screen are still there next time (§5).
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -16,8 +18,53 @@ __all__ = [
     "FILE_NAMES",
     "PDF_PRESETS",
     "PdfOptions",
+    "default_output_dir",
+    "export_file_name",
     "preset_name_for",
+    "resolve_output_dir",
+    "safe_file_stem",
 ]
+
+#: Used when the lecture has no usable name at all.
+_FALLBACK_NAME = "lecture"
+
+#: Everything Windows forbids in a file name, plus whitespace.
+_UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f\s]+')
+
+
+def safe_file_stem(title: str) -> str:
+    """``"Machine Learning 04"`` -> ``Machine_Learning_04``.
+
+    Anything a file or folder name cannot hold becomes an underscore.
+    """
+    safe = _UNSAFE.sub("_", title).strip("_. ")
+    # A name made only of separators (or only dots) leaves nothing to use.
+    return safe or _FALLBACK_NAME
+
+
+def default_output_dir(project_exports: Path, title: str, default_dir: Path | None) -> Path:
+    """Where a lecture exports when it has no folder of its own.
+
+    The app-wide default folder (an iCloud Drive folder, say) when one is set -
+    every file name starts with the lecture's name, so lectures sit side by
+    side there without overwriting each other. Otherwise the project's own
+    ``exports`` folder.
+    """
+    return project_exports if default_dir is None else Path(default_dir)
+
+
+def export_file_name(title: str, export_format: ExportFormat) -> str:
+    """``("OS02 Limited", PDF)`` -> ``OS02_Limited_lecture_notes.pdf``."""
+    return f"{safe_file_stem(title)}_{FILE_NAMES[export_format]}"
+
+
+def resolve_output_dir(
+    stored: str | None, project_exports: Path, title: str, default_dir: Path | None
+) -> Path:
+    """The folder an export writes to: the lecture's own choice, else the default."""
+    if stored:
+        return Path(stored)
+    return default_output_dir(project_exports, title, default_dir)
 
 
 class ExportFormat(str, Enum):
@@ -42,7 +89,8 @@ _LABELS = {
     ExportFormat.JSON: "JSON",
 }
 
-#: File names inside the output folder, as in the project layout (§5).
+#: File names inside the output folder, as in the project layout (§5). Written
+#: with the lecture's name in front - see :func:`export_file_name`.
 FILE_NAMES = {
     ExportFormat.PDF: "lecture_notes.pdf",
     ExportFormat.TXT: "transcript.txt",
@@ -100,7 +148,8 @@ class ExportSettings:
     #: them, and JSON always carries both times.
     include_timestamps: bool = True
     pdf: PdfOptions = field(default_factory=PdfOptions)
-    #: ``None`` means the project's own ``exports`` folder.
+    #: ``None`` means the default: the app-wide export folder when one is set,
+    #: otherwise the project's own ``exports`` folder.
     output_dir: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -132,3 +181,22 @@ class ExportSettings:
         output = data.get("output_dir")
         settings.output_dir = str(output) if output else None
         return settings
+
+    @classmethod
+    def for_lecture(
+        cls, stored: dict[str, Any] | None, app_defaults: dict[str, Any] | None
+    ) -> ExportSettings:
+        """The lecture's own choices, or else the last ones made for any lecture.
+
+        A folder is never inherited: a lecture without one of its own follows
+        the app-wide default export folder.
+        """
+        if stored:
+            return cls.from_dict(stored)
+        settings = cls.from_dict(app_defaults)
+        settings.output_dir = None
+        return settings
+
+    def as_app_defaults(self) -> dict[str, Any]:
+        """These choices for other lectures to start from - without the folder."""
+        return {**self.to_dict(), "output_dir": None}

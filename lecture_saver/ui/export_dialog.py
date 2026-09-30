@@ -28,16 +28,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..config import Settings
 from ..core.project import Project, ProjectError
 from ..export.document import LectureDocument, build_document
 from ..export.exporter import ExportResult
 from ..export.options import (
-    FILE_NAMES,
     PDF_PRESETS,
     ExportFormat,
     ExportSettings,
     PdfOptions,
+    default_output_dir,
+    export_file_name,
     preset_name_for,
+    resolve_output_dir,
 )
 from .theme import Role, set_role
 from .workers import ExportWorker, run_in_thread
@@ -55,19 +58,37 @@ class ExportDialog(QDialog):
     #: Emitted after an export finishes, with the result.
     exported = Signal(object)
 
-    def __init__(self, project: Project, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        project: Project,
+        parent: QWidget | None = None,
+        *,
+        default_dir: Path | None = None,
+        app_settings: Settings | None = None,
+    ) -> None:
+        """``default_dir`` is the app-wide export folder, when one is set and present.
+
+        With ``app_settings`` a lecture that has never been exported starts from
+        the choices of the last export, and each export updates them.
+        """
         super().__init__(parent)
         self.setWindowTitle("Export")
         self.setMinimumWidth(560)
         self._project = project
+        self._app_settings = app_settings
         self._thread: QThread | None = None
         self._worker: ExportWorker | None = None
         self._last_result: ExportResult | None = None
         self._syncing_preset = False
 
-        settings = ExportSettings.from_dict(project.meta.export_settings)
-        self._output_dir = (
-            Path(settings.output_dir) if settings.output_dir else project.exports_dir
+        settings = ExportSettings.for_lecture(
+            project.meta.export_settings,
+            app_settings.export_defaults if app_settings is not None else None,
+        )
+        self._default_output = default_output_dir(project.exports_dir, project.name, default_dir)
+        self._has_default_dir = default_dir is not None
+        self._output_dir = resolve_output_dir(
+            settings.output_dir, project.exports_dir, project.name, default_dir
         )
         self._build(settings)
         self._update_availability()
@@ -86,7 +107,7 @@ class ExportDialog(QDialog):
             check = QCheckBox(export_format.label)
             check.setChecked(export_format in settings.formats)
             check.toggled.connect(self._update_availability)
-            file_label = QLabel(FILE_NAMES[export_format])
+            file_label = QLabel(export_file_name(self._project.name, export_format))
             set_role(file_label, Role.SUBTLE)
             outputs_layout.addWidget(check, row, 0)
             outputs_layout.addWidget(file_label, row, 1)
@@ -159,6 +180,14 @@ class ExportDialog(QDialog):
         reset.clicked.connect(self._use_project_folder)
         destination_layout.addWidget(self._folder_label, 1)
         destination_layout.addWidget(change)
+        if self._has_default_dir:
+            default = QPushButton("Default folder")
+            default.setToolTip(
+                "Use the default export folder (File > Default export folder).\n"
+                f"{self._default_output}"
+            )
+            default.clicked.connect(self._use_default_folder)
+            destination_layout.addWidget(default)
         destination_layout.addWidget(reset)
 
         # Result and buttons
@@ -194,12 +223,16 @@ class ExportDialog(QDialog):
     # -- settings -------------------------------------------------------------
 
     def settings(self) -> ExportSettings:
-        project_exports = self._project.exports_dir
+        # The default is stored as "no folder of its own", so the lecture follows
+        # the default folder if it is set or changed later. Any other folder -
+        # the project folder included, once a default exists - is remembered.
         return ExportSettings(
             formats=[f for f, check in self._format_checks.items() if check.isChecked()],
             include_timestamps=self._stamps_include.isChecked(),
             pdf=self.pdf_options(),
-            output_dir=None if self._output_dir == project_exports else str(self._output_dir),
+            output_dir=(
+                None if self._output_dir == self._default_output else str(self._output_dir)
+            ),
         )
 
     def pdf_options(self) -> PdfOptions:
@@ -269,6 +302,9 @@ class ExportDialog(QDialog):
     def _use_project_folder(self) -> None:
         self.set_output_dir(self._project.exports_dir)
 
+    def _use_default_folder(self) -> None:
+        self.set_output_dir(self._default_output)
+
     # -- running ---------------------------------------------------------------
 
     def start_export(self) -> None:
@@ -303,6 +339,8 @@ class ExportDialog(QDialog):
             self._project.save_meta()
         except ProjectError:
             log.warning("Could not save export settings", exc_info=True)
+        if self._app_settings is not None:
+            self._app_settings.export_defaults = settings.as_app_defaults()
 
     def _set_running(self, running: bool) -> None:
         self._export_button.setEnabled(not running)

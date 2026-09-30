@@ -55,14 +55,18 @@ ROLE_START = Qt.ItemDataRole.UserRole + 1
 ROLE_SEGMENT = Qt.ItemDataRole.UserRole + 2
 ROLE_IS_CURRENT = Qt.ItemDataRole.UserRole + 3
 ROLE_IS_EDITED = Qt.ItemDataRole.UserRole + 4
+ROLE_TRANSLATION = Qt.ItemDataRole.UserRole + 5
 
 _PAD_X = 14
 _PAD_Y = 9
 _TIME_WIDTH = 74
 _GAP = 10
+#: Space between a line's text and its translation underneath.
+_TRANSLATION_GAP = 3
 _ACCENT = QColor(theme.ACCENT)
 _ACCENT_SOFT = QColor(theme.ACCENT_SOFT)
 _EDITED = QColor(theme.WARNING_TEXT)
+_TRANSLATION = QColor(theme.TRANSLATION)
 
 
 class TranscriptModel(QAbstractListModel):
@@ -77,11 +81,21 @@ class TranscriptModel(QAbstractListModel):
         super().__init__(parent)
         self._segments: Sequence[TranscriptSegment] = ()
         self._current_row = -1
+        #: Segment id -> imported Korean for that line. Display only.
+        self._translations: dict[str, str] = {}
 
     def set_segments(self, segments: Sequence[TranscriptSegment]) -> None:
         self.beginResetModel()
         self._segments = segments
         self._current_row = -1
+        self.endResetModel()
+
+    def set_translations(self, translations: dict[str, str]) -> None:
+        """Show each line's imported translation under it; ``{}`` for none."""
+        if translations == self._translations:
+            return
+        self.beginResetModel()
+        self._translations = dict(translations)
         self.endResetModel()
 
     def segment_at_row(self, row: int) -> TranscriptSegment | None:
@@ -142,6 +156,8 @@ class TranscriptModel(QAbstractListModel):
             return index.row() == self._current_row
         if role == ROLE_IS_EDITED:
             return segment.is_edited
+        if role == ROLE_TRANSLATION:
+            return self._translations.get(segment.id, "")
         if role == Qt.ItemDataRole.ToolTipRole:
             tip = f"{format_hms(segment.start)} - {format_hms(segment.end)}"
             if segment.is_edited:
@@ -264,7 +280,20 @@ class SegmentDelegate(QStyledItemDelegate):
         # An open editor needs a spare line so the text never jumps while typing.
         spare = QFontMetrics(opt.font).height() if self._is_editing(index) else 0
         height = self._text_rect(text, width, opt).height() + (_PAD_Y * 2) + spare
+        height += self._translation_height(index, width, opt)
         return QSize(opt.rect.width(), max(44, height))
+
+    def _translation_height(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+        width: int,
+        option: QStyleOptionViewItem,
+    ) -> int:
+        """Room for the line's translation under its text, 0 when there is none."""
+        translation = str(index.data(ROLE_TRANSLATION) or "")
+        if not translation:
+            return 0
+        return self._text_rect(translation, width, option).height() + _TRANSLATION_GAP
 
     def _is_editing(self, index: QModelIndex | QPersistentModelIndex) -> bool:
         view = self._view
@@ -338,20 +367,41 @@ class SegmentDelegate(QStyledItemDelegate):
         # The selection fill is a lightened highlight, so ordinary text colour
         # reads better on it than the white meant for a full highlight.
         painter.setPen(palette.color(QPalette.ColorRole.Text))
+        text_rect = self._editor_rect(opt, index)
         painter.drawText(
-            self._editor_rect(opt),
+            text_rect,
             int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignTop),
             text,
         )
 
+        # The imported translation, right under the line it translates.
+        translation = str(index.data(ROLE_TRANSLATION) or "")
+        if translation:
+            painter.setPen(_TRANSLATION)
+            painter.drawText(
+                QRect(
+                    text_rect.left(),
+                    text_rect.bottom() + 1 + _TRANSLATION_GAP,
+                    text_rect.width(),
+                    opt.rect.bottom() - text_rect.bottom(),
+                ),
+                int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignTop),
+                translation,
+            )
+
         painter.restore()
 
-    def _editor_rect(self, option: QStyleOptionViewItem) -> QRect:
+    def _editor_rect(
+        self, option: QStyleOptionViewItem, index: QModelIndex | QPersistentModelIndex
+    ) -> QRect:
+        """The line's own text; the translation, if any, sits below this."""
+        width = self._text_width(option)
+        below = self._translation_height(index, width, option)
         return QRect(
             option.rect.left() + _PAD_X + _TIME_WIDTH + _GAP,
             option.rect.top() + _PAD_Y,
-            self._text_width(option),
-            option.rect.height() - (_PAD_Y * 2),
+            width,
+            option.rect.height() - (_PAD_Y * 2) - below,
         )
 
     # -- editing ------------------------------------------------------------
@@ -404,7 +454,7 @@ class SegmentDelegate(QStyledItemDelegate):
         option: QStyleOptionViewItem,
         index: QModelIndex | QPersistentModelIndex,
     ) -> None:
-        editor.setGeometry(self._editor_rect(option))
+        editor.setGeometry(self._editor_rect(option, index))
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         # The base filter would close the editor on Escape and Tab before the
@@ -471,6 +521,13 @@ class TranscriptView(QListView):
     def set_segments(self, segments: Sequence[TranscriptSegment]) -> None:
         self.finish_editing()
         self._model.set_segments(segments)
+        self.scheduleDelayedItemsLayout()
+
+    def set_translations(self, translations: dict[str, str]) -> None:
+        """Segment id -> Korean, painted under each line. Not part of the text."""
+        if self.is_editing:
+            self.finish_editing()
+        self._model.set_translations(translations)
         self.scheduleDelayedItemsLayout()
 
     def clear_segments(self) -> None:

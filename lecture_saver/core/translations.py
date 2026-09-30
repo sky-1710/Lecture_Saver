@@ -27,8 +27,10 @@ from .slides import SlideAppearance
 __all__ = [
     "ParsedTranslation",
     "SlideTranslation",
+    "TimedLine",
     "TranslationSet",
     "match_translations",
+    "parse_timed_lines",
     "parse_translation_text",
 ]
 
@@ -52,6 +54,17 @@ _NOISE = re.compile(
 #: A ``---`` rule the answer puts between paragraphs. It separates them just
 #: as a blank line does, even when no blank line surrounds it.
 _RULE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+#: A line that starts with a transcript timestamp: ``[00:12:34] ...``, also
+#: also in bold (``**[00:12:34]**``); ``[MM:SS]`` is accepted too. The brackets
+#: are required, so a sentence that starts with a time is not taken for one.
+_TIMED = re.compile(
+    r"^\s*(?:[-*>]\s+)?(?:\*\*)?\[\s*(?P<stamp>(?:\d{1,2}:)?\d{1,2}:\d{2})\s*\](?:\*\*)?"
+    r"\s*(?:[-–—:]\s+)?(?P<text>.*)$"
+)
+#: A marker an assistant may put before the Korean line ("→ 번역", "> 번역").
+_LEAD = re.compile(r"^\s*(?:→|->|=>|>|-|\*)\s*")
+#: Hangul syllables and letters: the text that is the translation.
+_HANGUL = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
 #: Two appearances cover "the same stretch" when they overlap this much of the
 #: shorter one.
 SAME_INTERVAL_OVERLAP = 0.5
@@ -112,6 +125,65 @@ def parse_translation_text(text: str) -> ParsedTranslation:
     return ParsedTranslation(
         slides={n: body for n, body in slides.items() if body}, empty=empty
     )
+
+
+@dataclass(frozen=True)
+class TimedLine:
+    """The Korean for the transcript line spoken at ``start``."""
+
+    #: Whole seconds, as the timestamp was written (``HH:MM:SS``).
+    start: int
+    text: str
+
+
+def parse_timed_lines(translation: str) -> list[TimedLine]:
+    """Read a slide's translation written line by line under timestamps.
+
+    The request asks for each transcript line as ``[HH:MM:SS] English`` with
+    its Korean on the line below. Whatever follows a timestamp line, up to the
+    next one, is that line's translation. An answer that gives only
+    ``[HH:MM:SS] 한국어`` is read too: the text on the timestamp line is taken
+    when it is Korean and nothing follows it.
+
+    Returns an empty list for a translation written as paragraphs, which is
+    how answers to the earlier request look; those are shown as they were.
+    """
+    entries: list[TimedLine] = []
+    stamp: int | None = None
+    head = ""
+    body: list[str] = []
+
+    def close() -> None:
+        if stamp is None:
+            return
+        text = " ".join(body).strip()
+        if not text and _HANGUL.search(head):
+            text = head
+        if text:
+            entries.append(TimedLine(stamp, text))
+
+    for raw in translation.splitlines():
+        line = raw.strip()
+        if not line or _RULE.match(line):
+            continue
+        timed = _TIMED.match(line)
+        if timed:
+            close()
+            stamp = _seconds(timed.group("stamp"))
+            head = timed.group("text").strip()
+            body = []
+        elif stamp is not None:
+            body.append(_LEAD.sub("", line, count=1).strip())
+    close()
+    return entries
+
+
+def _seconds(stamp: str) -> int:
+    parts = [int(p) for p in stamp.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    hours, minutes, seconds = parts
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def _clean(lines: list[str]) -> str:

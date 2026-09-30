@@ -8,8 +8,10 @@ The goal is lecture notes rather than a debug dump:
   few lines of transcript still fit beneath it.
 * The transcript follows as paragraphs split at pauses in the speech, and flows
   onto as many pages as it needs.
-* An imported translation that pairs English with Korean replaces the plain
-  transcript, with a light rule between every paragraph so the original and its
+* An imported translation made line by line puts each Korean line directly
+  under the timestamped transcript line it translates.
+* One that pairs English with Korean paragraphs replaces the plain transcript,
+  with a light rule between every paragraph so the original and its
   translation never run together.
 * Korean, English and mixed text all come from one embedded TrueType font. If no
   font that can draw Korean is found the export fails with a clear message
@@ -21,6 +23,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -29,13 +32,25 @@ from ..core.timecode import format_duration, format_hms
 from .document import LectureDocument, Section, paragraphs
 from .options import PdfOptions
 
-__all__ = ["PdfExportError", "find_korean_font", "write_pdf"]
+__all__ = [
+    "FONT_BOLD",
+    "FONT_REGULAR",
+    "PdfExportError",
+    "build_pdf",
+    "find_korean_font",
+    "notes_story",
+    "pdf_styles",
+    "write_pdf",
+]
 
 #: Fraction of the text frame's height a slide picture may take.
 MAX_IMAGE_HEIGHT_FRACTION = 0.5
 
 _REGULAR = "LectureSaverSans"
 _BOLD = "LectureSaverSans-Bold"
+#: Public names for other PDFs built on this module (the study pack).
+FONT_REGULAR = _REGULAR
+FONT_BOLD = _BOLD
 
 
 class PdfExportError(RuntimeError):
@@ -135,6 +150,23 @@ def write_pdf(
     if not document.has_slides and not document.segments:
         raise PdfExportError("There is nothing to export yet: no transcript and no slides.")
 
+    def story(width: float, height: float) -> list[object]:
+        flowables = _story(document, options, width, height)
+        return _preface(preface) + flowables if preface else flowables
+
+    build_pdf(path, document.title, story)
+
+
+def build_pdf(
+    path: Path, title: str, make_story: Callable[[float, float], list[object]]
+) -> None:
+    """Lay out ``make_story(width, height)`` as an A4 PDF at ``path``, atomically.
+
+    The one place a PDF is written: the Korean font, the margins, the footer
+    and the never-half-a-file rule are the same for the notes and for the
+    study pack. ``make_story`` is given the text frame's size so pictures can
+    be scaled to fit it.
+    """
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
@@ -158,17 +190,15 @@ def write_pdf(
         str(temp),
         pagesize=A4,
         leftMargin=margin, rightMargin=margin, topMargin=margin, bottomMargin=margin + 4 * mm,
-        title=document.title,
+        title=title,
         creator="Lecture Saver",
     )
     try:
-        story = _story(document, options, doc.width, doc.height)
-        if preface:
-            story = _preface(preface) + story
+        story = make_story(doc.width, doc.height)
         doc.build(
             story,
-            onFirstPage=lambda canvas, d: _footer(canvas, d, document.title),
-            onLaterPages=lambda canvas, d: _footer(canvas, d, document.title),
+            onFirstPage=lambda canvas, d: _footer(canvas, d, title),
+            onLaterPages=lambda canvas, d: _footer(canvas, d, title),
         )
         os.replace(temp, path)
     except PdfExportError:
@@ -177,6 +207,23 @@ def write_pdf(
     except Exception as exc:  # noqa: BLE001 - report layout failures, never half a file
         temp.unlink(missing_ok=True)
         raise PdfExportError(f"The PDF could not be generated:\n{exc}") from exc
+
+
+def pdf_styles() -> dict[str, object]:
+    """The notes' paragraph styles, for other PDFs that should match them."""
+    return _styles()
+
+
+def notes_story(
+    document: LectureDocument,
+    options: PdfOptions,
+    width: float,
+    height: float,
+    *,
+    with_title: bool = True,
+) -> list[object]:
+    """The slide-by-slide notes as flowables, to place inside a larger PDF."""
+    return _story(document, options, width, height, with_title=with_title)
 
 
 def _styles() -> dict[str, object]:
@@ -213,6 +260,11 @@ def _styles() -> dict[str, object]:
             "translation", fontName=_REGULAR, fontSize=10.5, leading=17,
             textColor=colors.HexColor("#1E3A8A"),
         ),
+        # The Korean under one timestamped line, lined up with its text.
+        "translation_line": ParagraphStyle(
+            "translation_line", fontName=_REGULAR, fontSize=10.5, leading=16,
+            leftIndent=52, spaceAfter=8, textColor=colors.HexColor("#1E3A8A"),
+        ),
         # The English an answer repeats above each Korean paragraph.
         "translation_source": ParagraphStyle(
             "translation_source", fontName=_REGULAR, fontSize=10.5, leading=17,
@@ -225,18 +277,25 @@ def _styles() -> dict[str, object]:
 
 
 def _story(
-    document: LectureDocument, options: PdfOptions, width: float, height: float
+    document: LectureDocument,
+    options: PdfOptions,
+    width: float,
+    height: float,
+    *,
+    with_title: bool = True,
 ) -> list[object]:
     from reportlab.lib import colors
     from reportlab.platypus import HRFlowable, KeepTogether, Paragraph, Spacer
 
     styles = _styles()
-    story: list[object] = [Paragraph(escape(document.title), styles["title"])]
-    meta = [document.video_name]
-    if document.duration:
-        meta.append(format_duration(document.duration))
-    meta.append(f"Exported {datetime.now():%Y-%m-%d}")
-    story += [Paragraph(escape("  ·  ".join(meta)), styles["meta"]), Spacer(1, 10)]
+    story: list[object] = []
+    if with_title:
+        story.append(Paragraph(escape(document.title), styles["title"]))
+        meta = [document.video_name]
+        if document.duration:
+            meta.append(format_duration(document.duration))
+        meta.append(f"Exported {datetime.now():%Y-%m-%d}")
+        story += [Paragraph(escape("  ·  ".join(meta)), styles["meta"]), Spacer(1, 10)]
 
     slides = document.has_slides and options.shows_slides
     for position, section in enumerate(document.sections):
@@ -262,6 +321,10 @@ def _story(
             story.append(KeepTogether(block))
 
         translated = options.translation and bool(section.translation)
+        lines = section.timed_translation if translated else {}
+        if lines:
+            story += _interleaved(section, lines, styles, labelled=slides)
+            continue
         if translated and section.bilingual:
             # The pairs carry the English, so it is not printed twice.
             story += _translation(section, styles)
@@ -364,6 +427,30 @@ def _transcript(
         for group in paragraphs(segments):
             text = " ".join(s.effective_text.strip() for s in group)
             flowables.append(Paragraph(escape(text), styles["body"]))
+    return flowables
+
+
+def _interleaved(
+    section: Section, lines: dict[str, str], styles: dict[str, object], *, labelled: bool
+) -> list[object]:
+    """Every transcript line with its timestamp, its Korean right beneath it.
+
+    The timestamps are always shown here: they are what ties each Korean line
+    to its original. A line the answer skipped is left with its English only.
+    """
+    from reportlab.platypus import KeepTogether, Paragraph
+
+    flowables: list[object] = []
+    if labelled:
+        flowables.append(Paragraph("Transcript · 한국어 직역", styles["label"]))
+    for segment in section.spoken:
+        stamp = f'<font color="#6B7280">{format_hms(segment.start)}</font>'
+        text = escape(segment.effective_text.strip())
+        pair: list[object] = [Paragraph(f"{stamp}&nbsp;&nbsp;&nbsp;{text}", styles["stamped"])]
+        korean = lines.get(segment.id)
+        if korean:
+            pair.append(Paragraph(escape(korean), styles["translation_line"]))
+        flowables.append(KeepTogether(pair))
     return flowables
 
 

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -53,6 +54,7 @@ from ..core.search import SearchHit, search_lecture
 from ..core.slides import SlideAppearance, SlideSet
 from ..core.timecode import format_duration, format_hms
 from ..core.transcript_store import TextMatch, TranscriptEditError, TranscriptStore
+from ..export.document import pair_timed_translation
 from ..transcription.resume import resume_point
 from ..transcription.whisper_engine import WhisperOptions
 from .find_bar import FindBar
@@ -70,6 +72,40 @@ TAB_SLIDE = 0
 TAB_FULL = 1
 TAB_SEARCH = 2
 PREVIEW_HEIGHT = 150
+
+
+class ElidedLabel(QLabel):
+    """One line that shortens itself with "…" instead of widening the window.
+
+    A plain QLabel never gets narrower than its text, so a long lecture or
+    file name in the header set the window's minimum width - past the screen
+    on a laptop (§11). The whole text stays available as the tooltip.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(40)
+
+    @property
+    def full_text(self) -> str:
+        return self._full_text
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt's name
+        self._full_text = text
+        self.setToolTip(text)
+        self._elide()
+
+    def resizeEvent(self, event: object) -> None:  # noqa: N802 - Qt's name
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(
+            self._full_text, Qt.TextElideMode.ElideRight, max(self.width(), 0)
+        )
+        super().setText(shown)
 
 
 class LectureView(QWidget):
@@ -102,6 +138,10 @@ class LectureView(QWidget):
     exportRequested = Signal()
     #: One-click export of the notes PDF and Markdown.
     quickExportRequested = Signal()
+    #: Make the study pack: preview, notes, review quiz.
+    studyPackRequested = Signal()
+    #: Translate the lecture here, with an AI assistant.
+    translateRequested = Signal()
     #: Export the lecture with a Korean translation request on top.
     aiRequestRequested = Signal()
     #: Bring an assistant's translation back in.
@@ -114,6 +154,8 @@ class LectureView(QWidget):
         #: Which segments belong to which slide, recomputed from the times
         #: whenever the transcript or the slides are re-bound.
         self._alignment = Alignment((), ())
+        #: Segment id -> its line of an imported translation (see _rebind).
+        self._line_translations: dict[str, str] = {}
         self._appearance_starts: list[float] = []
         #: Index of the appearance shown on the current-slide tab, or -1.
         self._shown = -1
@@ -132,9 +174,9 @@ class LectureView(QWidget):
 
     def _build(self) -> None:
         # --- header ---
-        self._title_label = QLabel()
+        self._title_label = ElidedLabel()
         set_role(self._title_label, Role.TITLE)
-        self._subtitle_label = QLabel()
+        self._subtitle_label = ElidedLabel()
         set_role(self._subtitle_label, Role.MUTED)
 
         self._warning_bar = QFrame()
@@ -158,29 +200,53 @@ class LectureView(QWidget):
             "Save the lecture notes as lecture_notes.pdf and transcript.md in the "
             "project's exports folder, with the options last used."
         )
-        self._ai_request_button = QPushButton("AI translation request")
-        self._ai_request_button.setToolTip(
-            "Save the whole lecture as PDF and Markdown with a Korean translation "
-            "request at the top, ready to give to an AI assistant yourself.\n"
-            "Nothing is sent anywhere."
+        self._study_pack_button = QPushButton("Study pack")
+        self._study_pack_button.setToolTip(
+            "One PDF to study from: a simple preview to read before the lecture, "
+            "the slide notes, and a 15-question review quiz with answers.\n"
+            "The preview and quiz are written by the assistant from the "
+            "transcript text; the video, audio and slide images are never sent."
         )
-        self._import_translation_button = QPushButton("Import translation")
-        self._import_translation_button.setToolTip(
-            "Paste or load the AI assistant's answer; each slide's translation "
-            "is shown under its transcript and included in exports."
+        self._translate_button = QPushButton("Translate with AI")
+        self._translate_button.setToolTip(
+            "Translate the lecture into Korean here, slide by slide.\n"
+            "This sends the transcript text to the assistant; the video, the "
+            "audio and the slide images are never sent."
         )
-        self._export_button = QPushButton("More formats...")
-        self._export_button.setToolTip(
+        # Less frequent actions share one menu. As separate buttons the header
+        # needed more than the default window width and was cut off (§11).
+        self._more_formats_action = QAction("More export formats...", self)
+        self._more_formats_action.setToolTip(
             "Choose formats and options: PDF, TXT, Markdown, SRT, VTT, JSON."
         )
+        self._ai_request_menu_action = QAction("AI translation request (by hand)...", self)
+        self._ai_request_menu_action.setToolTip(
+            "Save the whole lecture as PDF and Markdown with a Korean translation "
+            "request at the top, ready to give to an AI assistant yourself. "
+            "Nothing is sent anywhere."
+        )
+        self._import_translation_menu_action = QAction("Import translation...", self)
+        self._import_translation_menu_action.setToolTip(
+            "Paste or load an AI assistant's answer; each slide's translation "
+            "is shown under its transcript and included in exports."
+        )
+        more_menu = QMenu(self)
+        more_menu.setToolTipsVisible(True)
+        more_menu.addAction(self._more_formats_action)
+        more_menu.addSeparator()
+        more_menu.addAction(self._ai_request_menu_action)
+        more_menu.addAction(self._import_translation_menu_action)
+        self._more_button = QPushButton("More")
+        self._more_button.setMenu(more_menu)
+        self._more_button.setToolTip("Other export formats and the by-hand translation")
         header = QHBoxLayout()
         header.setContentsMargins(16, 12, 16, 12)
         header.setSpacing(8)
         header.addLayout(titles, 1)
         header.addWidget(self._quick_export_button)
-        header.addWidget(self._ai_request_button)
-        header.addWidget(self._import_translation_button)
-        header.addWidget(self._export_button)
+        header.addWidget(self._study_pack_button)
+        header.addWidget(self._translate_button)
+        header.addWidget(self._more_button)
         header_bar = QFrame()
         set_flag(header_bar, "rule", "bottom")
         set_flag(header_bar, "surface")
@@ -399,10 +465,12 @@ class LectureView(QWidget):
         self._panel.resumeRequested.connect(self.resumeTranscriptionRequested)
         self._panel.cancelRequested.connect(self.cancelRequested)
         self._relocate_button.clicked.connect(self.relocateRequested)
-        self._export_button.clicked.connect(self.exportRequested)
         self._quick_export_button.clicked.connect(self.quickExportRequested)
-        self._ai_request_button.clicked.connect(self.aiRequestRequested)
-        self._import_translation_button.clicked.connect(self.importTranslationRequested)
+        self._study_pack_button.clicked.connect(self.studyPackRequested)
+        self._translate_button.clicked.connect(self.translateRequested)
+        self._more_formats_action.triggered.connect(self.exportRequested)
+        self._ai_request_menu_action.triggered.connect(self.aiRequestRequested)
+        self._import_translation_menu_action.triggered.connect(self.importTranslationRequested)
 
         self._transcript.textEdited.connect(self._on_text_edited)
         self._transcript.editingFinished.connect(self._on_editing_finished)
@@ -517,6 +585,8 @@ class LectureView(QWidget):
         self._project = None
         self._player.clear()
         self._transcript.clear_segments()
+        self._line_translations = {}
+        self._transcript.set_translations({})
         self._slides_pane.set_slides(SlideSet(), Path())
         self._alignment = Alignment((), ())
         self._appearance_starts = []
@@ -569,6 +639,7 @@ class LectureView(QWidget):
         appearances = self._project.slides.appearances
         self._alignment = align(segments, appearances)
         self._appearance_starts = [a.start for a in appearances]
+        self._line_translations = self._pair_line_translations()
 
         has_slides = bool(appearances)
         self._tabs.blockSignals(True)
@@ -617,6 +688,7 @@ class LectureView(QWidget):
             self._run_search()
             return
 
+        self._transcript.set_translations(self._line_translations)
         if self.showing_current_slide and self._shown >= 0:
             indices = self._alignment.segments_for(self._shown)
             self._transcript.set_segments(tuple(segments[i] for i in indices))
@@ -674,13 +746,33 @@ class LectureView(QWidget):
             self._slide_preview.setPixmap(pixmap)
         self._slide_header.setVisible(True)
 
+    def _pair_line_translations(self) -> dict[str, str]:
+        """Segment id -> Korean, for every slide translated line by line."""
+        if self._project is None:
+            return {}
+        segments = self._project.transcript.segments
+        pairs: dict[str, str] = {}
+        for index, appearance in enumerate(self._project.slides.appearances):
+            text = self._project.translations.for_appearance(appearance)
+            if text:
+                own = tuple(segments[i] for i in self._alignment.segments_for(index))
+                pairs.update(pair_timed_translation(own, text))
+        return pairs
+
     def _update_translation(self) -> None:
+        """The slide's translation in the panel - unless it was made line by
+        line, in which case each line already shows under its own segment."""
         appearance = self.shown_appearance
         text = (
             self._project.translations.for_appearance(appearance)
             if self._project is not None and appearance is not None
             else None
         )
+        if text and self._shown >= 0:
+            own = self._alignment.segments_for(self._shown)
+            segments = self._project.transcript.segments if self._project else []
+            if any(segments[i].id in self._line_translations for i in own):
+                text = None
         self._translation_text.setPlainText(text or "")
         self._translation_panel.setVisible(bool(text))
 
@@ -692,6 +784,7 @@ class LectureView(QWidget):
 
     def refresh_translations(self) -> None:
         if self._project is not None:
+            self._line_translations = self._pair_line_translations()
             self._show_transcript()
 
     def _preview(self, image: str) -> QPixmap | None:
@@ -1193,8 +1286,8 @@ class LectureView(QWidget):
 
     def set_export_enabled(self, enabled: bool) -> None:
         for button in (
-            self._export_button, self._quick_export_button,
-            self._ai_request_button, self._import_translation_button,
+            self._quick_export_button, self._study_pack_button,
+            self._translate_button, self._more_button,
         ):
             button.setEnabled(enabled)
 

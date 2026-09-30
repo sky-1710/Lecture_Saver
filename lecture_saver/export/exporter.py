@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..core.atomic_io import write_text_atomic
 from .document import LectureDocument
-from .options import FILE_NAMES, ExportFormat, ExportSettings
+from .options import ExportFormat, ExportSettings, export_file_name
 from .pdf import PdfExportError, write_pdf
 from .text_formats import to_json, to_markdown, to_srt, to_txt, to_vtt
 
@@ -62,7 +62,7 @@ def run_export(
     for position, export_format in enumerate(formats):
         if on_progress is not None:
             on_progress(export_format, position, len(formats))
-        target = output_dir / FILE_NAMES[export_format]
+        target = output_dir / export_file_name(document.title, export_format)
         try:
             _write_one(document, settings, export_format, target)
         except PdfExportError as exc:

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
 )
 
-from ..config import Settings, log_file
+from ..config import Settings, icloud_drive_dir, log_file
 from ..core.models import VideoInfo
 from ..core.project import Project, ProjectError, is_project_dir
 from ..core.slides import (
@@ -41,7 +41,7 @@ from ..core.slides import (
 )
 from ..core.timecode import format_hms
 from ..export.document import LectureDocument, build_document
-from ..export.options import ExportFormat, ExportSettings
+from ..export.options import ExportFormat, ExportSettings, resolve_output_dir
 from ..media.errors import FFmpegNotFoundError, MediaError
 from ..media.ffmpeg_tools import VIDEO_FILE_FILTER, find_ffmpeg, find_ffprobe
 from ..slides.pipeline import capture_slide_image
@@ -172,6 +172,12 @@ class MainWindow(QMainWindow):
         self._quick_export_action.setShortcut(QKeySequence("Ctrl+E"))
         self._quick_export_action.setEnabled(False)
         file_menu.addAction(self._quick_export_action)
+        self._study_pack_action = QAction("Create &study pack...", self)
+        self._study_pack_action.setEnabled(False)
+        file_menu.addAction(self._study_pack_action)
+        self._translate_action = QAction("&Translate with AI...", self)
+        self._translate_action.setEnabled(False)
+        file_menu.addAction(self._translate_action)
         self._ai_request_action = QAction("Create &AI translation request", self)
         self._ai_request_action.setEnabled(False)
         file_menu.addAction(self._ai_request_action)
@@ -182,6 +188,9 @@ class MainWindow(QMainWindow):
         self._export_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
         self._export_action.setEnabled(False)
         file_menu.addAction(self._export_action)
+        self._default_export_action = QAction("&Default export folder...", self)
+        self._default_export_action.triggered.connect(self._choose_default_export_dir)
+        file_menu.addAction(self._default_export_action)
 
         file_menu.addSeparator()
         quit_action = QAction("E&xit", self)
@@ -224,6 +233,8 @@ class MainWindow(QMainWindow):
         self._reveal_action.triggered.connect(self._reveal_project)
         self._export_action.triggered.connect(self._show_export)
         self._quick_export_action.triggered.connect(self._quick_export)
+        self._study_pack_action.triggered.connect(self._study_pack)
+        self._translate_action.triggered.connect(self._translate_with_ai)
         self._ai_request_action.triggered.connect(self._ai_translation_request)
         self._import_translation_action.triggered.connect(self._import_translation)
 
@@ -249,6 +260,8 @@ class MainWindow(QMainWindow):
         self._lecture_view.transcriptEdited.connect(self._on_transcript_edited)
         self._lecture_view.exportRequested.connect(self._show_export)
         self._lecture_view.quickExportRequested.connect(self._quick_export)
+        self._lecture_view.studyPackRequested.connect(self._study_pack)
+        self._lecture_view.translateRequested.connect(self._translate_with_ai)
         self._lecture_view.aiRequestRequested.connect(self._ai_translation_request)
         self._lecture_view.importTranslationRequested.connect(self._import_translation)
         self._lecture_view.statusMessage.connect(
@@ -378,6 +391,8 @@ class MainWindow(QMainWindow):
         self._reveal_action.setEnabled(True)
         self._export_action.setEnabled(True)
         self._quick_export_action.setEnabled(True)
+        self._study_pack_action.setEnabled(True)
+        self._translate_action.setEnabled(True)
         self._ai_request_action.setEnabled(True)
         self._import_translation_action.setEnabled(True)
         self._debug_action.setEnabled(True)
@@ -408,6 +423,8 @@ class MainWindow(QMainWindow):
         self._reveal_action.setEnabled(False)
         self._export_action.setEnabled(False)
         self._quick_export_action.setEnabled(False)
+        self._study_pack_action.setEnabled(False)
+        self._translate_action.setEnabled(False)
         self._ai_request_action.setEnabled(False)
         self._import_translation_action.setEnabled(False)
         self._debug_action.setEnabled(False)
@@ -804,12 +821,74 @@ class MainWindow(QMainWindow):
         self._flush_edits()
         from .export_dialog import ExportDialog
 
-        dialog = ExportDialog(self.project, self)
+        dialog = ExportDialog(
+            self.project, self,
+            default_dir=self._usable_default_export_dir(), app_settings=self.settings,
+        )
         dialog.exported.connect(self._on_exported)
         dialog.exec()
 
-    def _export_snapshot(self) -> tuple[LectureDocument, ExportSettings, Path] | None:
-        """Everything a background export needs, taken on the UI thread."""
+    def _usable_default_export_dir(self) -> Path | None:
+        """The default export folder, or ``None`` - with a warning - if it is gone.
+
+        A missing iCloud Drive folder must not be silently recreated as a plain
+        folder that never syncs, so exports fall back to the project folder and
+        say so.
+        """
+        folder = self.settings.default_export_dir
+        if folder is None:
+            return None
+        if folder.is_dir():
+            return folder
+        self.statusBar().showMessage(
+            f"The default export folder {folder} was not found - exporting to the "
+            "project folder instead. Is iCloud for Windows running?",
+            15000,
+        )
+        return None
+
+    def _choose_default_export_dir(self) -> None:
+        """Pick the folder every lecture exports to, e.g. an iCloud Drive folder."""
+        current = self.settings.default_export_dir
+        if current is not None:
+            box = QMessageBox(self)
+            box.setWindowTitle("Default export folder")
+            box.setText(
+                f"Lectures export to:\n{current}\n\n"
+                "Each file starts with the lecture's name, e.g. "
+                "<lecture name>_lecture_notes.pdf. A lecture that has chosen its "
+                "own folder in the export window keeps using that folder."
+            )
+            change = box.addButton("Change...", QMessageBox.ButtonRole.AcceptRole)
+            stop = box.addButton("Use project folders", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            if box.clickedButton() is stop:
+                self.settings.default_export_dir = None
+                self.statusBar().showMessage(
+                    "Lectures now export to their own project folders.", 8000
+                )
+                return
+            if box.clickedButton() is not change:
+                return
+
+        start = current or icloud_drive_dir() or Path.home()
+        path = QFileDialog.getExistingDirectory(self, "Default export folder", str(start))
+        if not path:
+            return
+        self.settings.default_export_dir = Path(path)
+        self.statusBar().showMessage(
+            f"Lectures now export to {Path(path)}.", 10000
+        )
+
+    def _export_snapshot(
+        self, *, use_default_folder: bool = True
+    ) -> tuple[LectureDocument, ExportSettings, Path] | None:
+        """Everything a background export needs, taken on the UI thread.
+
+        Without ``use_default_folder`` a lecture with no folder of its own
+        writes to its project folder rather than the app-wide export folder.
+        """
         if self.project is None:
             return None
         if self._export_thread is not None:
@@ -825,8 +904,17 @@ class MainWindow(QMainWindow):
             return None
         self._lecture_view.finish_editing()
         self._flush_edits()
-        settings = ExportSettings.from_dict(self.project.meta.export_settings)
-        output = Path(settings.output_dir) if settings.output_dir else self.project.exports_dir
+        settings = ExportSettings.for_lecture(
+            self.project.meta.export_settings, self.settings.export_defaults
+        )
+        default_dir = (
+            self._usable_default_export_dir()
+            if use_default_folder and not settings.output_dir
+            else None
+        )
+        output = resolve_output_dir(
+            settings.output_dir, self.project.exports_dir, self.project.name, default_dir
+        )
         return build_document(self.project), settings, output
 
     def _quick_export(self) -> None:
@@ -868,7 +956,9 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        snapshot = self._export_snapshot()
+        # The request is a working file for the assistant, not notes to read, so
+        # it stays out of the default export folder (an iCloud folder, say).
+        snapshot = self._export_snapshot(use_default_folder=False)
         if snapshot is None:
             return
         from ..export.ai_request import run_ai_request_export
@@ -880,6 +970,58 @@ class MainWindow(QMainWindow):
             ),
             ai_request=True,
         )
+
+    def _study_pack(self) -> None:
+        """Preview, notes and review quiz in one PDF."""
+        if self.project is None or self._busy:
+            return
+        if self.project.transcript.is_empty:
+            QMessageBox.information(
+                self, "No transcript yet",
+                "Transcribe the lecture first - the study pack is written from it.",
+            )
+            return
+        # The same snapshot an export takes: pending edits flushed, the notes
+        # options last used, and the folder the notes PDF goes to.
+        snapshot = self._export_snapshot()
+        if snapshot is None:
+            return
+        from .study_dialog import StudyPackDialog
+
+        document, settings, output = snapshot
+        dialog = StudyPackDialog(
+            self.project, self.settings, document, settings.pdf, output, self
+        )
+        dialog.changed.connect(
+            lambda: self.statusBar().showMessage("Study material saved", 6000)
+        )
+        dialog.exec()
+
+    def _translate_with_ai(self) -> None:
+        """Translate the lecture here rather than carrying it to an assistant."""
+        if self.project is None or self._busy:
+            return
+        if self.project.transcript.is_empty:
+            QMessageBox.information(
+                self, "No transcript yet",
+                "Transcribe the lecture first - there is nothing to translate.",
+            )
+            return
+        if not self.project.slides.appearances:
+            QMessageBox.information(
+                self, "No slides yet",
+                "Detect slides first: a translation is stored against the slide "
+                "it belongs to.",
+            )
+            return
+        from .translate_dialog import TranslateDialog
+
+        dialog = TranslateDialog(self.project, self.settings, self)
+        dialog.changed.connect(self._lecture_view.refresh_translations)
+        dialog.changed.connect(
+            lambda: self.statusBar().showMessage("Translation updated", 6000)
+        )
+        dialog.exec()
 
     def _import_translation(self) -> None:
         """Bring an assistant's translation back and attach it to the slides."""
@@ -1028,7 +1170,8 @@ class MainWindow(QMainWindow):
         self._close_action.setEnabled(enabled)
         has_project = enabled and self.project is not None
         for action in (
-            self._export_action, self._quick_export_action,
+            self._export_action, self._quick_export_action, self._translate_action,
+            self._study_pack_action,
             self._ai_request_action, self._import_translation_action,
         ):
             action.setEnabled(has_project)
@@ -1067,6 +1210,7 @@ class MainWindow(QMainWindow):
             f"Audio outputs: {len(outputs)}",
             f"Log file: {log_file()}",
             f"Projects folder: {self.settings.projects_dir}",
+            f"Default export folder: {self.settings.default_export_dir or 'project folders'}",
         ]
         QMessageBox.information(self, "Diagnostics", "\n".join(lines))
 

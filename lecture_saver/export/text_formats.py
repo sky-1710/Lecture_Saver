@@ -17,7 +17,7 @@ from ..core.models import SCHEMA_VERSION, TranscriptSegment
 from ..core.timecode import format_duration, format_hms, format_srt, format_vtt
 from .document import LectureDocument, Section, paragraphs, spoken
 
-__all__ = ["to_json", "to_markdown", "to_srt", "to_txt", "to_vtt"]
+__all__ = ["section_title", "to_json", "to_markdown", "to_srt", "to_txt", "to_vtt"]
 
 #: Subtitle players reject cues that end before they start.
 MIN_CUE_SECONDS = 0.5
@@ -27,7 +27,15 @@ def _text(segment: TranscriptSegment) -> str:
     return segment.effective_text.strip()
 
 
-def _section_title(section: Section) -> str:
+def section_title(section: Section) -> str:
+    """The heading a slide is written under: ``Slide 8`` or ``Slide 8 · With notes``.
+
+    Public because a translation has to come back under the same heading it
+    was asked for: :mod:`lecture_saver.translate` writes the prompt with this
+    and :func:`lecture_saver.core.translations.parse_translation_text` reads
+    the answer's headings back. If the two ever disagreed, every translation
+    would silently fail to match a slide.
+    """
     title = f"Slide {section.number}" if section.number is not None else "Transcript"
     return f"{title} · {section.label}" if section.label else title
 
@@ -61,7 +69,13 @@ def to_markdown(
 ) -> str:
     """Slide-by-slide notes in Markdown, with images linked relative to the file.
 
-    When a translation is included, every slide is laid out with ``---`` rules
+    A translation made line by line puts each Korean line right under its
+    timestamped transcript line::
+
+        **[00:12:34]** English line
+        > 한국어 직역
+
+    One made as paragraphs lays every slide out with ``---`` rules
     between its heading and each paragraph, so each English paragraph and its
     Korean translation stand apart::
 
@@ -81,6 +95,12 @@ def to_markdown(
 
     separated = translation and document.has_translation
     for section in document.sections:
+        lines_ko = section.timed_translation if translation else {}
+        if lines_ko:
+            if document.has_slides:
+                lines += _md_slide_header(section, output_dir)
+            lines += _md_interleaved(section, lines_ko)
+            continue
         if separated:
             lines += _separated_section(document, section, timestamps, output_dir)
             continue
@@ -97,7 +117,7 @@ _RULE = ["---", ""]
 
 
 def _md_slide_header(section: Section, output_dir: Path | None) -> list[str]:
-    lines = [f"## {_section_title(section)}", ""]
+    lines = [f"## {section_title(section)}", ""]
     lines += [f"`{format_hms(section.start)} – {format_hms(section.end)}`", ""]
     if section.image is not None:
         target = _relative(section.image, output_dir)
@@ -122,6 +142,15 @@ def _md_transcript_blocks(
     if timestamps:
         return [f"**[{format_hms(s.start)}]** {_md_escape(_text(s))}" for s in segments]
     return [_md_escape(" ".join(_text(s) for s in group)) for group in paragraphs(segments)]
+
+
+def _md_interleaved(section: Section, korean: dict[str, str]) -> list[str]:
+    lines: list[str] = []
+    for segment in section.spoken:
+        lines += [f"**[{format_hms(segment.start)}]** {_md_escape(_text(segment))}", ""]
+        if segment.id in korean:
+            lines += [f"> {_md_escape(korean[segment.id])}", ""]
+    return lines
 
 
 def _separated_section(
@@ -232,6 +261,7 @@ def to_json(document: LectureDocument, *, exported_at: datetime | None = None) -
                 "image": section.image_ref or None,
                 "transcript": [_segment_json(s) for s in section.segments],
                 "translation": section.translation or None,
+                "line_translations": section.timed_translation or None,
                 "same_slide_as": section.repeat_of,
             }
             for section in document.sections

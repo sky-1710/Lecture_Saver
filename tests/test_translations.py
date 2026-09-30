@@ -234,7 +234,8 @@ class TestExportsCarryTheTranslation:
 
     def test_the_ai_request_never_includes_an_old_translation(self, project):
         project.import_translation(ANSWER)
-        assert "한국어 직역**" not in ai_request_markdown(build_document(project))
+        text = ai_request_markdown(build_document(project))
+        assert "모델이 발산할 수 있습니다" not in text
 
     @pytest.mark.skipif(find_korean_font() is None, reason="no Korean font")
     def test_the_pdf_has_slide_transcript_and_translation(self, project, tmp_path):
@@ -313,3 +314,70 @@ class TestTranslationUI:
             assert window._import_translation_action.isEnabled()
         finally:
             window.close()
+
+
+# -- line-by-line translations ------------------------------------------------------
+
+TIMED_ANSWER = """## Slide 1
+
+[00:00:01] Today we start with the basics of machine learning.
+오늘은 machine learning의 기본부터 시작하겠습니다.
+
+## Slide 2
+
+**[00:00:12]** If the learning rate is too large, the model diverges.
+→ learning rate가 너무 크면 모델이 발산합니다.
+"""
+
+
+class TestTimedLines:
+    def test_the_korean_under_each_stamp_is_read(self):
+        from lecture_saver.core.translations import TimedLine, parse_timed_lines
+
+        text = "[00:12:34] If it is large,\n크면\n\n[12:38] 한국어만\n[00:13:00] Okay."
+        assert parse_timed_lines(text) == [
+            TimedLine(754, "크면"), TimedLine(758, "한국어만"),
+        ]
+
+    def test_paragraph_answers_and_times_in_sentences_are_not_lines(self):
+        from lecture_saver.core.translations import parse_timed_lines
+
+        assert parse_timed_lines("Plain paragraph.\n\n한국어 문단.") == []
+        assert parse_timed_lines("10:30분에 시작합니다.") == []
+
+    def test_lines_are_paired_with_segments_in_order(self):
+        from lecture_saver.export.document import pair_timed_translation
+
+        segments = (
+            TranscriptSegment(id="a", start=5.2, end=5.6, original_text="One"),
+            TranscriptSegment(id="b", start=5.7, end=7.0, original_text="Two"),
+            TranscriptSegment(id="c", start=9.9996, end=11, original_text="Three"),
+        )
+        text = "[00:00:05] One\n하나\n[00:00:05] Two\n둘\n[00:00:10] Three\n셋"
+        assert pair_timed_translation(segments, text) == {"a": "하나", "b": "둘", "c": "셋"}
+
+    def test_markdown_puts_each_korean_line_under_its_original(self, project):
+        project.import_translation(TIMED_ANSWER)
+        text = to_markdown(build_document(project), timestamps=False)
+        assert (
+            "**[00:00:12]** If the learning rate is too large, the model diverges.\n\n"
+            "> learning rate가 너무 크면 모델이 발산합니다.\n"
+        ) in text
+        assert "---" not in text
+
+    def test_json_carries_each_line(self, project):
+        project.import_translation(TIMED_ANSWER)
+        data = json.loads(to_json(build_document(project)))
+        assert data["slides"][1]["line_translations"] == {
+            "segment_002": "learning rate가 너무 크면 모델이 발산합니다."
+        }
+
+    @pytest.mark.skipif(find_korean_font() is None, reason="no Korean font")
+    def test_the_pdf_interleaves_lines(self, project, tmp_path):
+        from lecture_saver.export.options import PdfOptions
+        from lecture_saver.export.pdf import write_pdf
+
+        project.import_translation(TIMED_ANSWER)
+        pdf = tmp_path / "notes.pdf"
+        write_pdf(build_document(project), PdfOptions(translation=True), pdf)
+        assert pdf.stat().st_size > 0

@@ -16,6 +16,7 @@ from pathlib import Path
 from ..core.alignment import align
 from ..core.models import TranscriptSegment
 from ..core.project import Project
+from ..core.translations import parse_timed_lines
 
 __all__ = [
     "LectureDocument",
@@ -23,6 +24,7 @@ __all__ = [
     "TranslationBlock",
     "build_document",
     "nfc",
+    "pair_timed_translation",
     "paragraphs",
     "spoken",
     "translation_blocks",
@@ -72,6 +74,51 @@ def translation_blocks(translation: str) -> list[TranslationBlock]:
     return blocks
 
 
+#: How far a timestamp in the answer may be from a segment's start and still
+#: be that segment's. The answer copies ``HH:MM:SS``, which drops the fraction.
+_STAMP_TOLERANCE_SECONDS = 1
+
+
+def pair_timed_translation(
+    segments: tuple[TranscriptSegment, ...], translation: str
+) -> dict[str, str]:
+    """Segment id -> its Korean line, for a translation written per timestamp.
+
+    Each answer line is matched to the first spoken segment not yet taken whose
+    start, as ``HH:MM:SS`` shows it, equals the line's timestamp - so two segments
+    starting within the same second are paired in order. A line whose exact
+    second matches nothing goes to the nearest free segment within a second.
+    Empty for a translation written as paragraphs.
+    """
+    lines = parse_timed_lines(translation)
+    if not lines:
+        return {}
+    candidates = spoken(segments)
+    taken: set[str] = set()
+    pairs: dict[str, str] = {}
+    for line in lines:
+        exact = [s for s in candidates if s.id not in taken and _whole_second(s) == line.start]
+        if exact:
+            match = exact[0]
+        else:
+            near = [
+                s for s in candidates
+                if s.id not in taken
+                and abs(_whole_second(s) - line.start) <= _STAMP_TOLERANCE_SECONDS
+            ]
+            if not near:
+                continue
+            match = min(near, key=lambda s: abs(s.start - line.start))
+        taken.add(match.id)
+        pairs[match.id] = line.text
+    return pairs
+
+
+def _whole_second(segment: TranscriptSegment) -> int:
+    """The second :func:`format_hms` shows for the segment's start."""
+    return int(round(max(segment.start, 0.0) * 1000)) // 1000
+
+
 @dataclass(frozen=True)
 class Section:
     """One slide appearance and what was said while it was on screen.
@@ -106,6 +153,15 @@ class Section:
     @property
     def translation_blocks(self) -> list[TranslationBlock]:
         return translation_blocks(self.translation)
+
+    @property
+    def timed_translation(self) -> dict[str, str]:
+        """Segment id -> Korean, when the translation was made line by line.
+
+        Such a translation is shown under each timestamped line of the
+        transcript instead of as paragraphs after it.
+        """
+        return pair_timed_translation(self.segments, self.translation)
 
     @property
     def bilingual(self) -> bool:

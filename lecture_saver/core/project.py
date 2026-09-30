@@ -16,6 +16,7 @@ from .alignment import Alignment, align
 from .atomic_io import read_json, write_json_atomic
 from .models import ProjectMeta, StageStatus, Transcript, VideoInfo
 from .slides import SlideSet
+from .study import StudySet
 from .transcript_store import TranscriptStore
 from .translations import (
     MatchResult,
@@ -36,6 +37,8 @@ ORIGINAL_TRANSCRIPT_FILE = "transcript_original.json"
 SLIDES_FILE = "slides.json"
 #: Slide translations imported from an AI assistant's answer.
 TRANSLATIONS_FILE = "translations.json"
+#: The preview and the review quiz an assistant wrote for the study pack.
+STUDY_FILE = "study.json"
 
 
 class ProjectError(RuntimeError):
@@ -84,6 +87,8 @@ class Project:
         self.slides = slides if slides is not None else SlideSet()
         #: Imported slide translations. Empty until the user imports one.
         self.translations = TranslationSet()
+        #: Study pack material. Empty until the user makes one.
+        self.study = StudySet()
 
     # -- paths --------------------------------------------------------------
 
@@ -102,6 +107,10 @@ class Project:
     @property
     def translations_file(self) -> Path:
         return self.root / TRANSLATIONS_FILE
+
+    @property
+    def study_file(self) -> Path:
+        return self.root / STUDY_FILE
 
     @property
     def slides_file(self) -> Path:
@@ -246,7 +255,20 @@ class Project:
 
         project = cls(root, meta, transcript, slides)
         project.translations = cls._load_translations(root)
+        project.study = cls._load_study(root)
         return project
+
+    @staticmethod
+    def _load_study(root: Path) -> StudySet:
+        """Read study.json. A damaged file costs making it again, not the project."""
+        path = root / STUDY_FILE
+        if not path.is_file():
+            return StudySet()
+        try:
+            return StudySet.from_dict(read_json(path))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            log.warning("Ignoring an unreadable %s", STUDY_FILE, exc_info=True)
+            return StudySet()
 
     @staticmethod
     def _load_translations(root: Path) -> TranslationSet:
@@ -324,6 +346,12 @@ class Project:
             self.translations_file.unlink(missing_ok=True)
         except OSError as exc:
             raise ProjectError(f"Could not remove {TRANSLATIONS_FILE}:\n{exc}") from exc
+
+    def save_study(self) -> None:
+        try:
+            write_json_atomic(self.study_file, self.study.to_dict())
+        except OSError as exc:
+            raise ProjectError(f"Could not save {STUDY_FILE}:\n{exc}") from exc
 
     def save_translations(self) -> None:
         try:

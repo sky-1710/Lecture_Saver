@@ -3,10 +3,19 @@
 Turn a lecture recording into a transcript and, eventually, slide-linked notes —
 **entirely on your own computer.**
 
-Video, audio, slide images and transcripts never leave this machine. There is no
-cloud transcription service, no analytics, no telemetry, and no local server
-listening on a port. The only time an internet connection is needed at all is
-the first download of a Whisper model; after that the application works offline.
+Video, audio and slide images never leave this machine. There is no cloud
+transcription service, no analytics, no telemetry, and no local server listening
+on a port. Transcription, slide detection and every export run on your CPU, and
+once a Whisper model is downloaded the application works offline.
+
+**Two features are an exception, and they are off until you turn them on.**
+*Translate with AI* and *Study pack* send the transcript **text** to an AI
+assistant — to translate it into Korean, or to write a preview and a review
+quiz from it — because no local model on a laptop without a GPU does either
+well in reasonable time. The video, the audio and the slide images are never
+sent — only the words. The application asks, in as many words, before the first
+lecture is ever sent, and you can leave it switched off and translate by hand
+instead with *AI translation request*.
 
 **Current status: Phases 1–7 are implemented and working**, apart from the
 slide-region detection improvement listed under *Not built yet* — see
@@ -108,13 +117,40 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    repeated mistake. Edits save themselves.
 7. **Export.** Top right: *Export PDF + MD* (Ctrl+E) writes the lecture notes
    PDF - each slide with what was said on it - and the Markdown in one click.
-   *AI translation request* writes the same notes with a Korean translation
-   request on top, for you to give to an AI assistant. *More formats...*
-   (Ctrl+Shift+E) adds TXT, SRT, VTT and JSON and every option.
-8. **Bring the translation back.** Paste the assistant's answer into *Import
-   translation*; each slide's translation appears under its transcript and in
-   the PDF and Markdown.
-9. **Search** (Ctrl+Shift+F, or the *Search* tab) to find where anything was
+   *More* holds the rest: *More export formats...* (Ctrl+Shift+E) adds TXT,
+   SRT, VTT and JSON and every option, and *AI translation request (by hand)*
+   writes the notes with a Korean translation request on top, for you to give
+   to an AI assistant yourself.
+   To have notes appear on an iPad by themselves, install iCloud for Windows and
+   pick a folder inside iCloud Drive under **File → Default export folder...**.
+   Every exported file starts with the lecture's name
+   (`OS02-LimitedDirectExecution_lecture_notes.pdf`), so lectures sit side by
+   side there; the choices of your last export are where a new lecture starts.
+   AI translation requests stay in the project folder. Lecture Saver still
+   uploads nothing itself - iCloud syncs that folder, so its contents do go to
+   Apple's servers.
+8. **Translate.** Two ways, and both end in the same place. *Translate with
+   AI* does it here: it sends the transcript text, a few slides at a time, to
+   Codex signed in with your ChatGPT account, and saves each batch as it
+   arrives — stop it or hit your usage limit and what is done is kept, and
+   running it again carries on from the first untranslated slide. Or keep it
+   switched off and use *AI translation request*, which writes the lecture and
+   the request to a file for you to hand to an assistant yourself; paste the
+   answer into *Import translation*. Either way each slide's translation
+   appears under its transcript and in the PDF and Markdown.
+9. **Study pack.** One PDF to study from, in the order you use it:
+   **예습** (a preview to read before the lecture — the key points first,
+   the terms you need, then the whole lecture explained simply enough for a
+   middle-schooler, with everyday examples), then the **강의 노트** (each
+   slide with what was said), then a **15-question review quiz in English**,
+   with the answers and Korean explanations starting on the next page so they
+   are not in sight while you answer. The preview and the quiz are written by
+   Codex from the transcript text and saved in the project, so making the PDF
+   again — after fixing a line, or with other slide options — is instant and
+   uses no quota; if you edit the transcript afterwards the window offers to
+   write them again. The answers are shuffled across A–D by the application,
+   because models tend to put the right answer in the same place.
+10. **Search** (Ctrl+Shift+F, or the *Search* tab) to find where anything was
    said; click a result to jump to that slide and moment.
 
 Reopening a project restores everything.
@@ -332,7 +368,7 @@ Lecture 01/
   slides/001.jpg …              representative image per slide
   cache/frame_descriptors.npz   scanned frames (thumbnails + ink masks),
                                 so re-detection skips decoding
-  exports/                      lecture_notes.pdf, transcript.txt/.md/.srt/.vtt/.json
+  exports/                      <lecture>_lecture_notes.pdf, <lecture>_transcript.txt/.md/...
   logs/
 ```
 
@@ -515,3 +551,39 @@ testable without a GUI or a lecture recording.
 - Network access happens exactly once per model: the Hugging Face download of the
   Whisper weights. Pre-download a model, and the application never needs the
   internet again.
+
+### The one exception: *Translate with AI* and *Study pack*
+
+Everything above holds with these switched off, which is how they ship. They
+share one agreement — agree in either and both may send — and switching it on
+changes this, and only this:
+
+| | Sent to the assistant |
+|---|---|
+| Transcript text (the words, slide by slide) | **yes** |
+| Slide numbers and their labels | **yes** |
+| Video file | no |
+| Audio | no |
+| Slide images | no |
+| File names and paths | no |
+| Your name, e-mail or any identifier from the app | no |
+
+- Nothing is sent until you agree to it once, in a dialog that says what
+  leaves the computer. The setting lives in `%APPDATA%\LectureSaver`.
+- Both run through the **Codex CLI**, signed in with your own ChatGPT
+  account. Lecture Saver stores no API key and never sees your sign-in — it
+  runs the program you already have and reads back what it prints.
+- Codex is run with `--ephemeral`, so the lecture is not written into a
+  session log on disk, and with `--sandbox read-only`, so it cannot touch
+  your files.
+- Turn it off again and the rest of the application keeps working with no
+  internet connection.
+
+The study pack's preview and quiz are made from the same transcript text,
+in two requests of the whole lecture — an overview and a quiz both need to
+see all of it. The notes part of the study pack is built on your computer
+from your project, exactly like the notes PDF.
+
+To translate without sending anything, use *AI translation request* instead:
+it writes the lecture and the request to a file for you to carry to an
+assistant yourself, and *Import translation* brings the answer back.

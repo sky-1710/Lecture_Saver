@@ -94,6 +94,14 @@ Fully local lecture video → transcript → slide-linked notes.
           diagnostics.py         per-candidate gate results
           diagnose.py            --diagnose CLI, replayed from the cache
           pipeline.py            Pass C: capture images, persist, resumable
+        study/                   study pack: preview + quiz (sends text too)
+          prompts.py             the two requests and their JSON schemas
+          generator.py           ask, validate, shuffle answers, hand back
+        translate/               the ONE part that can send text off-machine
+          engine.py              what an engine is; the errors it may raise
+          codex_cli.py           Codex CLI via ChatGPT sign-in (subprocess)
+          batching.py            lecture -> batches that break on slides
+          runner.py              drive an engine, hand back each answer
         ui/
           theme.py               colours, stylesheet, roles - the whole look
           main_window.py         window, menus, view stack
@@ -454,3 +462,116 @@ project and the transcript is still there.
 
 `python run.py --selftest` runs a non-GUI check of FFmpeg discovery, the Qt import, the
 media backend and disk space, so setup problems are diagnosable without the UI.
+
+
+---
+
+## 12. In-app translation (Phase 7+)
+
+### Why this exists at all
+
+§1 says everything is local, and everything is — except this. A Korean
+translation of an English lecture is the one job no local model does well on
+the target machine: it has an Intel Iris Xe and no CUDA GPU, where a model
+large enough to translate a lecture properly runs at a few tokens a second
+and would take hours per lecture.
+
+So translation is the deliberate exception, built to be obvious rather than
+quiet:
+
+* **Off by default.** `translation_enabled` starts false in settings.
+* **Agreed to once, explicitly.** The dialog names what leaves the machine
+  and what does not before the first send.
+* **Only text.** An engine is handed a string and returns a string. It is
+  never given the project, a path or an image — `batching.batch_markdown`
+  emits slide headings and paragraphs, nothing else, and a test asserts no
+  path, file name or image link can appear in a prompt.
+* **Removable.** Delete `lecture_saver/translate/` and everything else still
+  builds: importing a translation the user obtained elsewhere lives in
+  `core/translations.py` and does not depend on this package.
+
+### The engine seam
+
+`TranslationEngine` is `prompt in -> answer out`, plus an availability check.
+Everything above it — batching, prompting, parsing, saving, progress,
+cancellation, the dialog — is written against that and does not know which
+assistant is running. A second engine (another CLI, or a local model once the
+hardware justifies it) is one class plus an entry in `available_engines()`.
+`sends_text_externally` on the class is what the warning keys off, so a local
+engine would simply not trigger it.
+
+### Codex specifically
+
+Run per batch as `codex exec`, with the prompt on **stdin** (a batch exceeds
+the Windows command-line limit), the answer via `--output-last-message` (so it
+is not dug out of progress chatter), `--ephemeral` (no session log of the
+lecture on disk), `--sandbox read-only`, and `--ignore-user-config`. The last
+one matters more than it looks: the user's `config.toml` carries a default
+model their installed Codex may be too old to accept, and MCP servers that
+are started for every run and fail if they need authorising. Neither belongs
+in a translation. Their sign-in is not in that file and still applies.
+
+### Batching, and why a failure is cheap
+
+Batches break on slide boundaries and never inside one, because the slide is
+both the unit the answer is addressed by (`## Slide 8`) and the unit a
+translation is stored against.
+
+The runner hands each answer back the moment it arrives instead of returning
+them together, and the window saves it before the next batch is asked for.
+Three things follow: a run that dies part-way keeps everything before the
+failure; a usage limit stops the run rather than failing every remaining
+batch for the same reason; and a second run skips whatever is already
+translated, so re-running *is* both the retry and the resume. Nothing is
+retried automatically — a failed batch has already cost quota, and the usual
+cause would fail again immediately.
+
+### Prompt sharing
+
+The rules sent to a CLI and the rules written into the hand-carried request
+are the same constants in `export/ai_request.py`. They have to be: both
+answers are read by the same parser, so a prompt that drifted between the two
+paths would produce answers that parse differently. The two differ only where
+they must — the hand-carried one asks for a `.md` file and allows a
+"continue" reply, the automated one asks for the answer alone and is sized to
+fit in one go.
+
+
+---
+
+## 13. Study pack (preview, notes, review quiz)
+
+One PDF: 예습 (key points, terms, the lecture explained at a
+middle-school level), the existing slide + transcript notes, a 15-question
+English quiz, then answers with Korean explanations from a fresh page.
+
+**Whole lecture, two requests.** Unlike translation it cannot be batched: a
+preview must know how the lecture ends, and a quiz must cover all of it.
+Measured lectures reach ~12k transcript tokens (85 min), well inside one
+request. Preview and quiz are separate requests so either can fail alone.
+
+**Structured, then checked.** Both use the engine's new `ask(..., schema=)`,
+which Codex enforces with `--output-schema`. The schemas follow strict mode
+(every property required, no extras); counts are enforced in
+`core/study.py`, not the schema, because `minItems` is not reliably accepted
+and a rejected schema fails the run. Validation drops what cannot be printed
+honestly — three options, an answer letter pointing nowhere, a slide number
+the lecture does not have — and refuses a quiz with fewer than 15 usable
+questions rather than printing a short one.
+
+**The application shuffles the answers.** Models place correct answers
+unevenly; `balance_answers` reorders each question's options with a seed
+from the transcript fingerprint, so the spread is even and a rebuilt PDF
+prints the same quiz. Questions whose options refer to each other ("Both A
+and B") are left alone.
+
+**Saved means free.** Each part is written to `study.json` on the UI thread
+as it arrives, with the fingerprint of the transcript it came from. Rebuilding
+the PDF reads it back and sends nothing. An edit to the *text* (not the
+timing) marks the parts stale, and the dialog offers — does not force — a
+rewrite, since most edits are a corrected word the quiz never asks about.
+
+**Notes are not re-laid-out.** Part 2 is `pdf.notes_story()`, the same code
+as the notes PDF, and every PDF goes through `pdf.build_pdf()` for the font,
+footer and atomic write; the two can never drift apart.
+

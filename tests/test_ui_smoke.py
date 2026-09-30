@@ -1138,6 +1138,29 @@ class TestExportDialog:
         assert dialog._preset.currentText() == "Slide + Transcript"
         assert dialog.output_dir == project_with_slides.exports_dir
 
+    def test_the_default_export_folder_is_used_and_stays_the_default(
+        self, qapp, project_with_slides, tmp_path
+    ):
+        from lecture_saver.export.options import safe_file_stem
+        from lecture_saver.ui.export_dialog import ExportDialog
+
+        icloud = tmp_path / "iCloudDrive"
+        icloud.mkdir()
+        dialog = ExportDialog(project_with_slides, default_dir=icloud)
+        assert dialog.output_dir == icloud
+        from PySide6.QtWidgets import QLabel
+
+        labels = [label.text() for label in dialog.findChildren(QLabel)]
+        assert f"{safe_file_stem(project_with_slides.name)}_lecture_notes.pdf" in labels
+        # Stored as "the default", so a later change of default is followed.
+        assert dialog.settings().output_dir is None
+
+        # Choosing the project folder while a default exists is remembered.
+        dialog._use_project_folder()
+        assert dialog.settings().output_dir == str(project_with_slides.exports_dir)
+        dialog._use_default_folder()
+        assert dialog.settings().output_dir is None
+
     def test_choosing_a_preset_sets_the_boxes_and_editing_a_box_makes_it_custom(
         self, qapp, project_with_slides
     ):
@@ -1158,7 +1181,7 @@ class TestExportDialog:
     def test_exporting_writes_files_reports_them_and_remembers_the_choice(
         self, qapp, project_with_slides
     ):
-        from lecture_saver.export.options import ExportFormat, ExportSettings
+        from lecture_saver.export.options import ExportFormat, ExportSettings, export_file_name
 
         dialog = self._dialog(project_with_slides)
         dialog._format_checks[ExportFormat.PDF].setChecked(False)
@@ -1169,9 +1192,11 @@ class TestExportDialog:
 
         assert result.ok
         exports = project_with_slides.exports_dir
-        assert (exports / "transcript.txt").is_file()
-        assert (exports / "transcript.srt").is_file()
-        assert "transcript.srt" in dialog.result_text
+        txt = exports / export_file_name(project_with_slides.name, ExportFormat.TXT)
+        srt = exports / export_file_name(project_with_slides.name, ExportFormat.SRT)
+        assert txt.is_file()
+        assert srt.is_file()
+        assert srt.name in dialog.result_text
         assert str(exports) in dialog.result_text
         assert dialog._open_folder.isVisibleTo(dialog)
 
@@ -1180,7 +1205,7 @@ class TestExportDialog:
         )
         assert remembered.formats == [ExportFormat.TXT, ExportFormat.SRT]
         assert remembered.include_timestamps is False
-        text = (exports / "transcript.txt").read_text(encoding="utf-8")
+        text = txt.read_text(encoding="utf-8")
         assert "[00:" not in text
         assert "If the value is too large, the model diverges." in text
 
@@ -1213,7 +1238,8 @@ class TestExportDialog:
         pump_until(lambda: bool(results))
 
         assert results and results[0].ok
-        assert (tmp_path / "elsewhere" / "transcript.txt").is_file()
+        assert [p.parent for p in results[0].written] == [tmp_path / "elsewhere"]
+        assert results[0].written[0].name.endswith("_transcript.txt")
 
 
 class TestExportFromTheWindow:
@@ -1279,10 +1305,31 @@ class TestOneClickExports:
         view.quickExportRequested.connect(lambda: seen.append("quick"))
         view.aiRequestRequested.connect(lambda: seen.append("ai"))
         view.exportRequested.connect(lambda: seen.append("more"))
+        view.importTranslationRequested.connect(lambda: seen.append("import"))
         view._quick_export_button.click()
-        view._ai_request_button.click()
-        view._export_button.click()
-        assert seen == ["quick", "ai", "more"]
+        # The less frequent ones live in the header's "More" menu.
+        menu = view._more_button.menu()
+        assert menu is not None
+        view._ai_request_menu_action.trigger()
+        view._more_formats_action.trigger()
+        view._import_translation_menu_action.trigger()
+        assert seen == ["quick", "ai", "more", "import"]
+        assert {a.text() for a in menu.actions() if a.text()} == {
+            "More export formats...",
+            "AI translation request (by hand)...",
+            "Import translation...",
+        }
+
+    def test_the_header_fits_the_smallest_window(self, qapp, project_with_slides):
+        """Six buttons in a row needed 1282 px and were cut off (§11)."""
+        from lecture_saver.ui.theme import stylesheet
+
+        view = LectureView()
+        # On the view, not the application, so no other test sees the change.
+        view.setStyleSheet(stylesheet())
+        view.load_project(project_with_slides)
+        header = view._quick_export_button.parentWidget()
+        assert header.minimumSizeHint().width() <= 820
 
     def test_shortcuts(self, window):
         assert window._quick_export_action.shortcut().toString() == "Ctrl+E"
@@ -1315,14 +1362,47 @@ class TestOneClickExports:
         assert threads[0] is QApplication.instance().thread()
 
     def test_export_pdf_and_markdown_in_one_click(self, window, project_with_slides):
+        from lecture_saver.export.options import safe_file_stem
+
         window._quick_export()
         result, ai_request = self._wait(window)
 
         assert ai_request is False
         names = sorted(p.name for p in result.written)
-        assert names == ["lecture_notes.pdf", "transcript.md"] or result.failures
-        assert (project_with_slides.exports_dir / "transcript.md").is_file()
-        assert not (project_with_slides.exports_dir / "transcript.txt").exists()
+        stem = safe_file_stem(project_with_slides.name)
+        assert names == [f"{stem}_lecture_notes.pdf", f"{stem}_transcript.md"] or result.failures
+        assert (project_with_slides.exports_dir / f"{stem}_transcript.md").is_file()
+        assert not (project_with_slides.exports_dir / f"{stem}_transcript.txt").exists()
+
+    def test_one_click_export_goes_to_the_default_folder(
+        self, window, project_with_slides, tmp_path
+    ):
+        from lecture_saver.export.options import safe_file_stem
+
+        icloud = tmp_path / "iCloudDrive"
+        icloud.mkdir()
+        window.settings.default_export_dir = icloud
+        window._quick_export()
+        result, _ = self._wait(window)
+
+        assert result.output_dir == icloud
+        stem = safe_file_stem(project_with_slides.name)
+        assert (icloud / f"{stem}_lecture_notes.pdf").is_file() or result.failures
+        assert (icloud / f"{stem}_transcript.md").is_file()
+
+    def test_a_missing_default_folder_is_not_created_silently(
+        self, window, project_with_slides, tmp_path
+    ):
+        gone = tmp_path / "iCloudDrive"
+        window.settings.default_export_dir = gone
+        messages: list[str] = []
+        window.statusBar().messageChanged.connect(messages.append)
+        window._quick_export()
+        result, _ = self._wait(window)
+
+        assert not gone.exists()
+        assert result.output_dir == project_with_slides.exports_dir
+        assert any("was not found" in message for message in messages)
 
     def test_the_ai_request_is_written_for_an_english_lecture(self, window, project_with_slides):
         from PySide6.QtWidgets import QMessageBox
@@ -1766,3 +1846,49 @@ class TestSplittingAtSlideChanges:
             assert len(window.project.transcript.segments) == before
         finally:
             window.close()
+
+
+class TestLineByLineTranslation:
+    ANSWER = (
+        "## Slide 1\n\n"
+        "[00:00:00] Today we begin with the basic concepts of machine learning.\n"
+        "오늘은 machine learning의 기본 개념부터 시작합니다.\n\n"
+        "[00:00:10] 여기서 러닝레이트를 보시면\n"
+        "여기서 learning rate를 보시면\n"
+    )
+
+    def test_each_line_shows_its_korean_and_the_panel_stays_hidden(
+        self, qapp, project_with_slides
+    ):
+        from lecture_saver.ui.transcript_view import ROLE_TRANSLATION
+
+        project_with_slides.import_translation(self.ANSWER)
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view.refresh_translations()
+
+        model = view._transcript.model()
+        korean = [model.index(r, 0).data(ROLE_TRANSLATION) for r in range(model.rowCount())]
+        assert korean == [
+            "오늘은 machine learning의 기본 개념부터 시작합니다.",
+            "여기서 learning rate를 보시면",
+        ]
+        assert view.shown_translation == ""
+
+    def test_a_row_with_a_translation_is_taller(self, qapp, project_with_slides):
+        from PySide6.QtWidgets import QStyleOptionViewItem
+
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view._transcript.resize(400, 600)
+        index = view._transcript.model().index(0, 0)
+        option = QStyleOptionViewItem()
+        option.rect.setWidth(400)
+        option.font = view._transcript.font()
+        delegate = view._transcript.itemDelegate()
+        before = delegate.sizeHint(option, index).height()
+
+        project_with_slides.import_translation(self.ANSWER)
+        view.refresh_translations()
+        index = view._transcript.model().index(0, 0)
+        assert delegate.sizeHint(option, index).height() > before

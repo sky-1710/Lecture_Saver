@@ -18,11 +18,11 @@ from lecture_saver.core.slides import Slide, SlideAppearance, SlideSet
 from lecture_saver.export.document import build_document, nfc, paragraphs
 from lecture_saver.export.exporter import run_export
 from lecture_saver.export.options import (
-    FILE_NAMES,
     PDF_PRESETS,
     ExportFormat,
     ExportSettings,
     PdfOptions,
+    export_file_name,
     preset_name_for,
 )
 from lecture_saver.export.pdf import PdfExportError, find_korean_font, write_pdf
@@ -237,6 +237,55 @@ class TestOptions:
         assert odd.formats == [ExportFormat.PDF]
 
 
+class TestOutputFolder:
+    EXPORTS = Path("C:/Projects/ml/exports")
+
+    def test_without_a_default_the_project_folder_is_used(self):
+        from lecture_saver.export.options import resolve_output_dir
+
+        assert resolve_output_dir(None, self.EXPORTS, "ML 01", None) == self.EXPORTS
+
+    def test_with_a_default_lectures_share_it_under_their_own_names(self):
+        from lecture_saver.export.options import resolve_output_dir
+
+        icloud = Path("C:/Users/me/iCloudDrive/Lecture_Saver")
+        assert resolve_output_dir(None, self.EXPORTS, "Machine Learning 04", icloud) == icloud
+        assert export_file_name("Machine Learning 04", ExportFormat.PDF) == (
+            "Machine_Learning_04_lecture_notes.pdf"
+        )
+        korean = export_file_name("9주차: 상표권", ExportFormat.MARKDOWN)
+        assert korean == "9주차_상표권_transcript.md"
+
+    def test_a_lecture_without_choices_starts_from_the_last_export(self):
+        last = ExportSettings(
+            formats=[ExportFormat.PDF], pdf=PdfOptions(translation=True), output_dir="D:/x"
+        )
+        fresh = ExportSettings.for_lecture({}, last.as_app_defaults())
+        assert fresh.formats == [ExportFormat.PDF]
+        assert fresh.output_dir is None, "a folder is never inherited"
+        own = ExportSettings(formats=[ExportFormat.SRT]).to_dict()
+        assert ExportSettings.for_lecture(own, last.as_app_defaults()).formats == [
+            ExportFormat.SRT
+        ]
+        assert ExportSettings.for_lecture(None, None) == ExportSettings()
+
+    def test_a_folder_the_lecture_chose_wins_over_the_default(self):
+        from lecture_saver.export.options import resolve_output_dir
+
+        icloud = Path("C:/Users/me/iCloudDrive")
+        assert resolve_output_dir("D:/notes", self.EXPORTS, "ML", icloud) == Path("D:/notes")
+
+    def test_the_default_folder_is_remembered_by_the_app(self, tmp_path):
+        from lecture_saver.config import Settings
+
+        settings = Settings(tmp_path / "settings.json")
+        assert settings.default_export_dir is None
+        settings.default_export_dir = tmp_path / "iCloudDrive"
+        assert Settings(tmp_path / "settings.json").default_export_dir == tmp_path / "iCloudDrive"
+        settings.default_export_dir = None
+        assert Settings(tmp_path / "settings.json").default_export_dir is None
+
+
 # -- PDF ----------------------------------------------------------------------------
 
 
@@ -349,7 +398,9 @@ class TestRunExport:
         settings = ExportSettings(formats=list(ExportFormat))
         result = run_export(document, settings, project.exports_dir)
         assert result.ok
-        assert sorted(p.name for p in result.written) == sorted(FILE_NAMES.values())
+        assert sorted(p.name for p in result.written) == sorted(
+            export_file_name(document.title, f) for f in ExportFormat
+        )
 
     def test_one_failing_format_does_not_stop_the_others(self, project, tmp_path):
         project.set_slides(SlideSet())
@@ -357,7 +408,8 @@ class TestRunExport:
             formats=[ExportFormat.PDF, ExportFormat.TXT], pdf=PDF_PRESETS["Slides Only"]
         )
         result = run_export(build_document(project), settings, tmp_path)
-        assert [p.name for p in result.written] == ["transcript.txt"]
+        txt = export_file_name(project.name, ExportFormat.TXT)
+        assert [p.name for p in result.written] == [txt]
         assert [f for f, _ in result.failures] == [ExportFormat.PDF]
         assert not result.ok
 
@@ -390,28 +442,30 @@ class TestAiTranslationRequest:
         assert "learning rate를 보시면" in lecture
         assert TRANSLATION_REQUEST.strip() in text
 
-    def test_the_request_asks_for_english_then_korean_paragraph_by_paragraph(self):
+    def test_the_request_asks_for_korean_under_each_timestamped_line(self):
         from lecture_saver.export.ai_request import TRANSLATION_REQUEST
 
         for rule in (
-            "영어 원문 한 문단 → `---` → 한국어 직역 한 문단",  # the shape asked for
-            "`---` 한 줄로 구분한 뒤",                          # English and Korean apart
-            "---\n## Slide 1\n---\n",                          # the slide heading too
+            "바로 다음 줄에 그 줄의 한국어 직역",               # the shape asked for
+            "`[HH:MM:SS]` 형태로 옮기세요",                     # stamps kept for matching
             "영어를 지우면 안 됩니다",                          # the English is kept
-            "모든 문단을 빠짐없이",                              # nothing is dropped
-            "문단을 합치거나 나누지 마세요",                     # the grouping is kept
+            "모든 줄을 빠짐없이",                                # nothing is dropped
+            "줄을 합치거나 나누지 마세요",                       # the grouping is kept
             "전공 용어는 영어로",
             "요약하거나",
-            "learning rate가 너무 크면",                         # the worked example
+            "[00:12:34] If the learning rate is too large,\nlearning rate가 너무 크면",
             "Markdown(.md) 파일",                                # comes back into the app
             "PDF 파일",                                          # and one to read
         ):
             assert rule in TRANSLATION_REQUEST
 
-    def test_the_lecture_part_has_paragraphs_not_timestamps(self, document):
+    def test_the_lecture_part_has_a_timestamp_on_every_line(self, document):
         from lecture_saver.export.ai_request import ai_request_markdown
+        from lecture_saver.export.document import spoken
 
-        assert "**[00:" not in ai_request_markdown(document)
+        text = ai_request_markdown(document)
+        lecture = text[text.index("아래부터 강의 전사입니다."):]
+        assert lecture.count("**[00:") == len(spoken(document.segments))
 
     @needs_korean_font
     def test_both_files_are_written_with_the_request_first(self, document, tmp_path):
