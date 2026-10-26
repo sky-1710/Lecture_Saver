@@ -23,9 +23,13 @@ from ..core.project import Project, ProjectError
 from ..core.timecode import format_hms
 from ..media.errors import Cancelled, MediaError, MissingVideoFileError, NoAudioTrackError
 from ..media.ffmpeg_tools import extract_audio
+from .openvino_engine import OpenVinoEngine, OpenVinoUnavailableError
 from .resume import next_segment_number, resume_point
 from .whisper_engine import (
+    ENGINE_FASTER_WHISPER,
+    ENGINE_OPENVINO,
     ModelLoadError,
+    TranscriptionEngine,
     TranscriptionResult,
     WhisperEngine,
     WhisperOptions,
@@ -176,9 +180,8 @@ class TranscriptionPipeline:
             )
         self.project.set_stage("transcription", StageStatus.RUNNING)
 
-        engine = WhisperEngine(self.options)
         self._emit(STAGE_TRANSCRIBE, None, "Loading the transcription model...")
-        engine.load(on_status=lambda msg: self._emit(STAGE_TRANSCRIBE, None, msg))
+        engine = self._load_engine()
 
         self._check_cancel()
         if point is not None:
@@ -233,6 +236,9 @@ class TranscriptionPipeline:
 
         settings = self.project.meta.transcription
         settings.model_size = self.options.model_size
+        settings.engine = self.options.engine
+        settings.resolved_engine = result.engine
+        settings.keywords = self.options.keywords
         settings.device = self.options.device
         settings.compute_type = self.options.compute_type
         settings.language = self.options.language
@@ -246,6 +252,36 @@ class TranscriptionPipeline:
         self._keep_original()
         self.project.set_stage("transcription", StageStatus.DONE)
         return result
+
+    def _load_engine(self) -> TranscriptionEngine:
+        """The engine the options ask for, loaded - or faster-whisper in its place.
+
+        OpenVINO is an extra runtime that can be missing or unable to start on a
+        given machine; when it is, the lecture is still transcribed, on the CPU,
+        and the user is told why it was slower (§28).
+        """
+        def on_status(message: str) -> None:
+            self._emit(STAGE_TRANSCRIBE, None, message)
+
+        if self.options.resolved_engine == ENGINE_OPENVINO:
+            openvino = OpenVinoEngine(self.options)
+            try:
+                openvino.load(on_status=on_status)
+                return openvino
+            except OpenVinoUnavailableError as exc:
+                log.warning("OpenVINO unavailable; falling back to faster-whisper: %s", exc)
+                fallback = WhisperEngine(replace(self.options, engine=ENGINE_FASTER_WHISPER))
+                fallback.load(on_status=on_status)
+                fallback.note_fallback(
+                    "The Intel GPU engine (OpenVINO) could not start, so this lecture "
+                    "was transcribed with the CPU engine instead, which is slower.\n\n"
+                    f"Details: {str(exc).splitlines()[0]}"
+                )
+                return fallback
+
+        engine = WhisperEngine(self.options)
+        engine.load(on_status=on_status)
+        return engine
 
     def _keep_original(self) -> None:
         """Record Whisper's output so the transcript can be reset to it later.

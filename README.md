@@ -5,8 +5,9 @@ Turn a lecture recording into a transcript and, eventually, slide-linked notes �
 
 Video, audio and slide images never leave this machine. There is no cloud
 transcription service, no analytics, no telemetry, and no local server listening
-on a port. Transcription, slide detection and every export run on your CPU, and
-once a Whisper model is downloaded the application works offline.
+on a port. Transcription, slide detection and every export run on your own
+CPU (and, for the Turbo model, the Intel integrated GPU), and once a Whisper
+model is downloaded the application works offline.
 
 **Two features are an exception, and they are off until you turn them on.**
 *Translate with AI* and *Study pack* send the transcript **text** to an AI
@@ -157,16 +158,31 @@ Reopening a project restores everything.
 
 ### Choosing a model
 
-This machine has **no CUDA GPU**, so transcription runs on the CPU. That makes
-the model choice the single biggest decision:
+**Use Turbo** (the default). It is Whisper large-v3-turbo, run by Intel's
+OpenVINO on the integrated GPU (Iris Xe and similar) — which faster-whisper
+cannot use, since its GPU support is CUDA-only. Measured on an i7-1165G7:
 
-| Model | Download | Speed | Korean quality | 1-hour lecture takes |
+| Model | Engine | Download | 1-hour lecture takes | Korean quality |
 |---|---|---|---|---|
-| `tiny` | 75 MB | ~4x realtime | poor | ~15 min |
-| `base` | 145 MB | ~2.5x | weak | ~25 min |
-| **`small`** (default) | 480 MB | ~1.2x | usable | ~50 min |
-| `medium` | 1.5 GB | ~0.45x | good | ~2 h |
-| `large-v3` | 3.1 GB | ~0.2x | best | ~5 h |
+| **Turbo** (default) | OpenVINO, Intel GPU | 830 MB | ~14 min | very good |
+| Turbo, no Intel GPU | OpenVINO, CPU | 830 MB | ~25 min* | very good |
+| `medium` | faster-whisper, CPU | 1.5 GB | ~35–45 min | good |
+| `small` | faster-whisper, CPU | 480 MB | ~10 min* | usable |
+| `large-v3` | faster-whisper, CPU | 3.1 GB | ~1.5 h* | best |
+
+A 58-minute Korean lecture took 13 min with Turbo and 40 min with `medium`.
+\* The app's estimates, not re-measured end to end.
+
+Against `medium` on the same lecture, Turbo fixed several of its mistakes
+(할다는 → 할당하는, 센스티브 → 센시티브, a mix of 벨리/밸리/베리데이션 → 밸리데이션)
+and made a couple of its own; with VAD windows it kept a sentence that a
+single long-form pass dropped. If OpenVINO cannot start, the lecture is still
+transcribed — with faster-whisper on the CPU — and the app says so.
+
+**Keywords.** Type the course terms the lecture uses, comma-separated
+(`크로스 밸리데이션, Naive Bayes, TLB`). Whisper is given them as hints before
+every 30-second window and spells them that way: on the test lecture this turned
+"크루스 밸리데이션" into "크로스 밸리데이션". They are kept per lecture.
 
 The app shows an estimate before you start, and you can cancel at any time —
 segments already transcribed are kept.
@@ -196,6 +212,9 @@ to one language for the whole recording.
   rather than where Whisper's decoder stopped (about 12% slower; it is what
   makes slide boundaries land between sentences)
 - Local transcription with **faster-whisper** (CTranslate2), CPU int8
+- **Turbo on the Intel GPU** via OpenVINO: VAD-cut 30-second windows, about
+  2.7x faster than `medium`, falling back to the CPU and then to faster-whisper
+- Keyword hints (course terms) given to Whisper before every window
 - Korean, English, Japanese, Chinese, or auto-detect
 - Segment-level timestamps
 - Transcript list with click-to-seek and follow-playback highlighting
@@ -512,9 +531,10 @@ fresh scan.
 ```powershell
 pip install -r requirements-dev.txt
 
-pytest                # 315 tests, ~30 s, no lecture video or model needed
+pytest                # 931 tests, no lecture video or model needed
 pytest -m scenario    # + renders real lecture clips and detects slides in them
-pytest -m model       # + real transcription (downloads the tiny model)
+pytest -m model       # + real transcription (downloads the tiny model; runs
+                      #   Turbo on OpenVINO too if its model is downloaded)
 ruff check .
 mypy lecture_saver
 ```
@@ -531,7 +551,7 @@ stack are in [ARCHITECTURE.md](ARCHITECTURE.md).
 lecture_saver/
   core/            pure logic — models, project storage, transcript state (no Qt)
   media/           FFmpeg discovery, probing, audio extraction
-  transcription/   faster-whisper engine and the processing pipeline
+  transcription/   faster-whisper and OpenVINO engines, and the processing pipeline
   ui/              all Qt lives here
 ```
 
@@ -542,8 +562,11 @@ testable without a GUI or a lecture recording.
 
 ## Privacy
 
-- No cloud speech or vision APIs — transcription is `faster-whisper` running
-  locally on your CPU
+- No cloud speech or vision APIs — transcription is `faster-whisper` on your
+  CPU, or OpenVINO on your Intel GPU, both running locally. OpenVINO installs an
+  `openvino-telemetry` package; only its model-conversion tool (`ovc`) uses it,
+  and the app never runs that. A Turbo transcription, model loading included,
+  was watched for network connections and made none.
 - No telemetry, analytics, crash reporting or remote logging
 - No local web server and no listening socket
 - Project data stays in your project folders; settings stay in

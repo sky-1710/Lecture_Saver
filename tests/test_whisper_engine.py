@@ -60,6 +60,16 @@ class TestSentenceLines:
         engine_with(model, sentence_lines=True).transcribe(Path("lecture.wav"))
         assert model.kwargs["word_timestamps"] is True
 
+    def test_keywords_are_given_as_hotwords(self):
+        model = FakeModel([])
+        engine_with(model, keywords="TLB, Naive Bayes").transcribe(Path("lecture.wav"))
+        assert model.kwargs["hotwords"] == "TLB, Naive Bayes"
+
+    def test_no_keywords_means_no_hotwords(self):
+        model = FakeModel([])
+        engine_with(model).transcribe(Path("lecture.wav"))
+        assert model.kwargs["hotwords"] is None
+
     def test_lines_are_rebuilt_at_the_sentence_ends(self):
         # Whisper's own chunks split the second sentence down the middle.
         model = FakeModel(

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QPushButton,
     QToolButton,
@@ -23,12 +24,18 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.timecode import format_duration, format_hms
+from ..transcription.openvino_engine import openvino_gpu_available
 from ..transcription.whisper_engine import (
+    ENGINE_OPENVINO,
+    KEYWORD_CHAR_LIMIT,
     LANGUAGE_CHOICES,
     MODEL_SIZES,
+    TURBO_MODEL,
     WhisperOptions,
     cuda_device_count,
+    engine_for_model,
     estimate_seconds,
+    normalize_keywords,
 )
 from .theme import Role, set_flag, set_role
 
@@ -60,11 +67,21 @@ class TranscribePanel(QFrame):
         self._model_box = QComboBox()
         for key, label, size, _ in MODEL_SIZES:
             self._model_box.addItem(f"{label}  ({size})", key)
-        self._model_box.setCurrentIndex([m[0] for m in MODEL_SIZES].index("small"))
+        self._model_box.setCurrentIndex([m[0] for m in MODEL_SIZES].index(TURBO_MODEL))
 
         self._language_box = QComboBox()
         for key, label in LANGUAGE_CHOICES:
             self._language_box.addItem(label, key)
+
+        self._keywords_edit = QLineEdit()
+        self._keywords_edit.setMaxLength(KEYWORD_CHAR_LIMIT * 2)
+        self._keywords_edit.setClearButtonEnabled(True)
+        self._keywords_edit.setPlaceholderText("e.g. cross validation, Naive Bayes, TLB")
+        self._keywords_edit.setToolTip(
+            "Terms, names and acronyms this lecture uses, separated by commas.\n"
+            "Whisper is given them as hints, so it spells them the way you\n"
+            f"write them here. Optional; up to {KEYWORD_CHAR_LIMIT} characters are used."
+        )
 
         self._vad_check = QCheckBox("Skip silent parts (recommended)")
         self._vad_check.setChecked(True)
@@ -86,6 +103,7 @@ class TranscribePanel(QFrame):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.addRow("Model:", self._model_box)
         form.addRow("Language:", self._language_box)
+        form.addRow("Keywords:", self._keywords_edit)
         form.addRow("", self._vad_check)
 
         self._start_button = QPushButton("Transcribe lecture")
@@ -182,7 +200,7 @@ class TranscribePanel(QFrame):
         self._update_estimate()
 
     def set_defaults(self, values: dict[str, object]) -> None:
-        model = str(values.get("model_size", "small"))
+        model = str(values.get("model_size", TURBO_MODEL))
         index = self._model_box.findData(model)
         if index >= 0:
             self._model_box.setCurrentIndex(index)
@@ -193,12 +211,16 @@ class TranscribePanel(QFrame):
             self._language_box.setCurrentIndex(index)
 
         self._vad_check.setChecked(bool(values.get("vad_filter", True)))
+        # Keywords belong to a lecture, so a set without them clears the box
+        # rather than carrying the last lecture's terms over.
+        self._keywords_edit.setText(str(values.get("keywords", "") or ""))
 
     def options(self) -> WhisperOptions:
         return WhisperOptions(
             model_size=str(self._model_box.currentData()),
             language=str(self._language_box.currentData()),
             vad_filter=self._vad_check.isChecked(),
+            keywords=normalize_keywords(self._keywords_edit.text()),
         )
 
     def set_already_transcribed(self, count: int) -> None:
@@ -262,9 +284,8 @@ class TranscribePanel(QFrame):
         self._blocked_reason = "" if enabled else reason
         self._start_button.setEnabled(enabled)
         self._resume_button.setEnabled(enabled)
-        self._model_box.setEnabled(enabled)
-        self._language_box.setEnabled(enabled)
-        self._vad_check.setEnabled(enabled)
+        for widget in self._option_widgets:
+            widget.setEnabled(enabled)
         if not enabled and reason:
             self._stage_label.setText(reason)
 
@@ -285,7 +306,7 @@ class TranscribePanel(QFrame):
         self._progress.setRange(0, 0)  # indeterminate until a fraction arrives
         self._percent_label.setText("")
         self._detail_label.setText("")
-        for widget in (self._model_box, self._language_box, self._vad_check):
+        for widget in self._option_widgets:
             widget.setEnabled(False)
 
     def end_run(self, final_message: str) -> None:
@@ -296,7 +317,7 @@ class TranscribePanel(QFrame):
         self._progress_row.setVisible(False)
         self._percent_label.setText("")
         self._stage_label.setText(final_message)
-        for widget in (self._model_box, self._language_box, self._vad_check):
+        for widget in self._option_widgets:
             widget.setEnabled(True)
 
     def update_progress(self, stage: str, fraction: float, message: str) -> None:
@@ -315,6 +336,10 @@ class TranscribePanel(QFrame):
     def percent_text(self) -> str:
         return self._percent_label.text()
 
+    @property
+    def _option_widgets(self) -> tuple[QWidget, ...]:
+        return (self._model_box, self._language_box, self._keywords_edit, self._vad_check)
+
     # -- internals ----------------------------------------------------------
 
     def _on_start(self) -> None:
@@ -330,13 +355,21 @@ class TranscribePanel(QFrame):
             self._estimate_label.setText("")
             return
         model = str(self._model_box.currentData())
-        estimate = estimate_seconds(self._video_duration, model)
-        # The estimate model is calibrated for CPU int8, so say which one this
-        # machine will actually use rather than assuming.
-        if cuda_device_count() > 0:
-            hardware = "a CUDA GPU was found, so this should be faster"
+        # Say which hardware this machine will actually use rather than assuming.
+        if engine_for_model(model) == ENGINE_OPENVINO:
+            gpu = openvino_gpu_available()
+            estimate = estimate_seconds(self._video_duration, model, gpu=gpu)
+            hardware = (
+                "it runs on the Intel GPU" if gpu
+                else "no Intel GPU was found, so it runs on the CPU"
+            )
         else:
-            hardware = "no CUDA GPU was found, so this runs on the CPU"
+            # The estimate is calibrated for CPU int8.
+            estimate = estimate_seconds(self._video_duration, model)
+            if cuda_device_count() > 0:
+                hardware = "a CUDA GPU was found, so this should be faster"
+            else:
+                hardware = "no CUDA GPU was found, so this runs on the CPU"
         self._estimate_label.setText(
             f"Roughly {format_duration(estimate)} on this computer "
             f"({hardware}). You can cancel at any time."

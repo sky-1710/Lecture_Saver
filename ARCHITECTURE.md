@@ -85,6 +85,8 @@ Fully local lecture video → transcript → slide-linked notes.
           ffmpeg_tools.py        locate / probe / extract audio (with progress)
         transcription/
           whisper_engine.py      faster-whisper wrapper + device fallback
+          openvino_engine.py     Turbo on the Intel GPU (OpenVINO), window by window
+          chunking.py            VAD speech regions -> 30 s windows, time mapping
           segmentation.py        Whisper words -> lines that end at sentences
           pipeline.py            extract -> transcribe -> persist, resumable
         slides/
@@ -220,6 +222,35 @@ video. Nothing compares fingerprints yet (§12).
 5. **Persist incrementally.** A crash or cancel at 80 % leaves 80 % on disk (§26).
 6. **Device fallback** (§28): CUDA → CPU on any CTranslate2 init failure, and
    `float16 → int8` on OOM, each logged and surfaced as a friendly notice.
+
+**The Turbo model runs on OpenVINO instead** (`openvino_engine.py`). CTranslate2
+can only use CUDA GPUs, so on a laptop with Intel integrated graphics the GPU
+sat idle. OpenVINO runs Whisper large-v3-turbo (Intel's int8 build) on that GPU:
+measured on an i7-1165G7 / Iris Xe, 5 minutes of Korean lecture took 71-75 s
+against 205 s for faster-whisper `medium` on the CPU, back to back, and a whole
+58-minute lecture took 13 minutes against `medium`'s 40. The differences from
+the faster-whisper path:
+
+* **Windows instead of a stream.** Silero VAD (faster-whisper's copy) finds the
+  speech; `chunking.py` packs it, silence removed, into windows of at most 30 s
+  and maps window times back onto the lecture. One `generate()` per window gives
+  progress and cancellation between windows. Whisper handed only silence invents
+  text ("리리리..."), so silence is never sent, and lines that compress better
+  than 2.4 (faster-whisper's own loop test) are dropped.
+* **Line breaks.** OpenVINO's word times run edge to edge, so the segmenter's
+  silence rule never fires. The last word of each of Whisper's own lines is
+  marked `ends_chunk` and ends a line instead; words are matched to Whisper's
+  lines by letter count, because the word times can lag by a word.
+* **Language** is detected on the first window and then held.
+* **Fallbacks:** GPU → OpenVINO CPU → faster-whisper (same model, CPU), the last
+  only when OpenVINO cannot run at all. A model that cannot be downloaded is an
+  error, not a fallback - falling back would only try a bigger download.
+
+**Keywords** (both engines): comma-separated course terms, up to 600 characters,
+go to Whisper as `hotwords` - the prompt before *every* window, unlike
+`initial_prompt`, which only reaches the first when previous text is not carried
+over. OpenVINO refuses a prompt over ~220 tokens, so the terms are halved until
+they fit.
 
 **Language:** `auto` (Whisper's own detection), or forced `ko`/`en`. For mixed
 Korean/English lectures, forcing `ko` gives markedly better results than `auto`,

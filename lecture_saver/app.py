@@ -149,6 +149,16 @@ def selftest() -> int:
         cuda = 0
     print(f"CUDA devices     : {cuda} ({'GPU' if cuda else 'CPU-only'})")
 
+    # Optional: without it the Turbo model falls back to faster-whisper.
+    try:
+        import openvino
+        import openvino_genai
+
+        devices = ", ".join(openvino.Core().available_devices)
+        print(f"OpenVINO         : {openvino_genai.__version__.split('-')[0]} ({devices})")
+    except Exception as exc:  # noqa: BLE001
+        print(f"OpenVINO         : unavailable - {exc} (Turbo will use the CPU engine)")
+
     free_gb = shutil.disk_usage(Path.home()).free / 1e9
     print(f"Free disk        : {free_gb:.1f} GB")
     if free_gb < 2:

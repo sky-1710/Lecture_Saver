@@ -87,6 +87,36 @@ class TestOverLongLines:
         # Something is always left pending, so the next sentence keeps its start.
         assert segmenter.pending
 
+    def test_gapless_words_are_not_peeled_off_one_at_a_time(self):
+        # Word times that run edge to edge (OpenVINO's) give the longest-gap
+        # rule nothing to choose between; the cut must still make real lines.
+        segmenter = SentenceSegmenter(min_seconds=0.0, max_seconds=4.0)
+        spoken = words(*[f"w{i}" for i in range(40)], step=0.5)
+        lines = segmenter.feed(spoken) + segmenter.flush()
+        assert all(len(line.text.split()) > 1 for line in lines)
+        assert all(line.end - line.start <= 4.5 for line in lines)
+
+    def test_a_cut_is_never_in_the_first_half_of_the_line(self):
+        segmenter = SentenceSegmenter(min_seconds=0.0, max_seconds=4.0, pause=9.0)
+        spoken = [Word("one", 0.0, 0.4), Word("two", 1.0, 1.4)]  # an early 0.6 s gap
+        spoken += words(*[f"w{i}" for i in range(8)], start=1.4, step=0.4)
+        first = segmenter.feed(spoken)[0]
+        assert first.end - first.start >= 2.0
+
+
+class TestWhisperLineEnds:
+    def test_where_whisper_ended_its_line_ends_ours(self):
+        segmenter = SentenceSegmenter(min_seconds=1.0)
+        spoken = [Word("데이터를", 0.0, 0.6), Word("나눠서", 0.6, 1.2, ends_chunk=True),
+                  Word("사용합니다", 1.2, 2.0)]
+        assert texts(segmenter.feed(spoken)) == ["데이터를 나눠서"]
+
+    def test_a_very_short_whisper_line_joins_what_follows(self):
+        segmenter = SentenceSegmenter(min_seconds=1.5)
+        spoken = [Word("예", 0.0, 0.4, ends_chunk=True), Word("그래서", 0.4, 1.0),
+                  Word("보통", 1.0, 1.8, ends_chunk=True)]
+        assert texts(segmenter.feed(spoken)) == ["예 그래서 보통"]
+
 
 class TestTimesAndText:
     def test_a_line_carries_the_times_of_its_words(self):

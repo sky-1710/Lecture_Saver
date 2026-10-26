@@ -384,7 +384,7 @@ class MainWindow(QMainWindow):
         self.settings.add_recent_project(project.root)
         self._refresh_recent()
 
-        self._lecture_view.load_project(project)
+        self._lecture_view.load_project(project, self.settings.transcription_defaults())
         self._stack.setCurrentWidget(self._lecture_view)
         self.setWindowTitle(f"{project.name} - Lecture Saver")
         self._close_action.setEnabled(True)
@@ -443,7 +443,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self.project.relocate_video(Path(path))
-        self._lecture_view.load_project(self.project)
+        self._lecture_view.load_project(self.project, self.settings.transcription_defaults())
         self.statusBar().showMessage("Video location updated", 5000)
 
     def _refresh_recent(self) -> None:

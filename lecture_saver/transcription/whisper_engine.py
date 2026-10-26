@@ -15,7 +15,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .segmentation import SentenceSegmenter, Word
 
@@ -24,13 +24,21 @@ log = logging.getLogger(__name__)
 __all__ = [
     "MODEL_SIZES",
     "LANGUAGE_CHOICES",
+    "ENGINE_AUTO",
+    "ENGINE_FASTER_WHISPER",
+    "ENGINE_OPENVINO",
+    "TURBO_MODEL",
+    "KEYWORD_CHAR_LIMIT",
     "WhisperOptions",
     "WhisperEngine",
+    "TranscriptionEngine",
     "RawSegment",
     "TranscriptionResult",
     "WhisperUnavailableError",
     "ModelLoadError",
+    "engine_for_model",
     "estimate_seconds",
+    "normalize_keywords",
 ]
 
 
@@ -61,12 +69,32 @@ class ModelLoadError(RuntimeError):
 #: busier machine is slower, and an estimate that overshoots is kinder than one
 #: that runs out.
 MODEL_SIZES: tuple[tuple[str, str, str, float], ...] = (
+    # Runs through OpenVINO (openvino_engine.py), on the Intel GPU when there is
+    # one. The factor here is its CPU speed; see GPU_SPEED for the GPU.
+    ("large-v3-turbo", "Turbo - fast, high quality (recommended)", "830 MB", 2.5),
     ("tiny", "Tiny - fastest, lowest quality", "75 MB", 18.0),
     ("base", "Base - fast, weak on Korean", "145 MB", 10.0),
-    ("small", "Small - balanced (recommended)", "480 MB", 6.0),
+    ("small", "Small - balanced", "480 MB", 6.0),
     ("medium", "Medium - good quality, slow", "1.5 GB", 2.0),
     ("large-v3", "Large v3 - best quality, very slow", "3.1 GB", 0.7),
 )
+
+#: Speed as a multiple of real time when the model runs on the Intel GPU.
+#: Measured on Iris Xe (i7-1165G7) with word timestamps: 5 minutes of Korean
+#: lecture in about 60 s.
+GPU_SPEED: dict[str, float] = {"large-v3-turbo": 4.5}
+
+#: ``engine`` values. ``auto`` picks by model: Turbo is OpenVINO's, the rest
+#: are faster-whisper's.
+ENGINE_AUTO = "auto"
+ENGINE_FASTER_WHISPER = "faster-whisper"
+ENGINE_OPENVINO = "openvino"
+
+TURBO_MODEL = "large-v3-turbo"
+
+#: How much keyword hint text Whisper is given. Its prompt holds about 220
+#: tokens; this many characters of comma-separated terms stays inside it.
+KEYWORD_CHAR_LIMIT = 600
 
 LANGUAGE_CHOICES: tuple[tuple[str, str], ...] = (
     ("auto", "Detect automatically"),
@@ -77,10 +105,43 @@ LANGUAGE_CHOICES: tuple[tuple[str, str], ...] = (
 )
 
 
-def estimate_seconds(video_duration: float, model_size: str) -> float:
-    """Rough wall-clock estimate for a CPU transcription run."""
+def estimate_seconds(video_duration: float, model_size: str, *, gpu: bool = False) -> float:
+    """Rough wall-clock estimate for a transcription run.
+
+    ``gpu`` means the Intel GPU will run the model, for the models that use it.
+    """
     factor = next((f for key, _, _, f in MODEL_SIZES if key == model_size), 1.0)
+    if gpu:
+        factor = GPU_SPEED.get(model_size, factor)
     return video_duration / factor if factor > 0 else 0.0
+
+
+def engine_for_model(model_size: str) -> str:
+    """The engine a model runs on when the user has not said otherwise."""
+    return ENGINE_OPENVINO if model_size == TURBO_MODEL else ENGINE_FASTER_WHISPER
+
+
+def normalize_keywords(text: str, limit: int = KEYWORD_CHAR_LIMIT) -> str:
+    """Comma-separated, de-duplicated terms, cut to whole terms under ``limit``.
+
+    The terms are handed to Whisper as hint text before every window, which
+    steers it toward their spelling - course jargon, names, acronyms.
+    """
+    seen: set[str] = set()
+    terms: list[str] = []
+    for raw in text.replace("\n", ",").split(","):
+        term = " ".join(raw.split())
+        if term and term.casefold() not in seen:
+            seen.add(term.casefold())
+            terms.append(term)
+
+    joined = ""
+    for term in terms:
+        candidate = f"{joined}, {term}" if joined else term
+        if len(candidate) > limit:
+            break
+        joined = candidate
+    return joined
 
 
 def cuda_device_count() -> int:
@@ -97,6 +158,9 @@ def cuda_device_count() -> int:
 @dataclass
 class WhisperOptions:
     model_size: str = "small"
+    #: Which implementation runs the model; ``"auto"`` goes by the model
+    #: (:func:`engine_for_model`).
+    engine: str = ENGINE_AUTO
     #: ``"auto"`` picks CUDA when available and falls back to CPU.
     device: str = "auto"
     compute_type: str = "auto"
@@ -111,10 +175,17 @@ class WhisperOptions:
     #: time and makes every line a sentence, which is what the slide matching
     #: and the notes need.
     sentence_lines: bool = True
+    #: Course terms, comma-separated, given to Whisper as spelling hints in
+    #: every window (:func:`normalize_keywords`).
+    keywords: str = ""
 
     @property
     def whisper_language(self) -> str | None:
         return None if self.language == "auto" else self.language
+
+    @property
+    def resolved_engine(self) -> str:
+        return engine_for_model(self.model_size) if self.engine == ENGINE_AUTO else self.engine
 
 
 #: faster-whisper works on 16 kHz mono audio.
@@ -137,11 +208,31 @@ class TranscriptionResult:
     #: Set when we had to fall back from the requested device/precision, so the
     #: UI can tell the user why it is slower than they asked for (§28).
     fallback_note: str | None = None
+    #: Which implementation produced this.
+    engine: str = ENGINE_FASTER_WHISPER
 
 
 SegmentCallback = Callable[[RawSegment, float], None]
 CancelCheck = Callable[[], bool]
 StatusCallback = Callable[[str], None]
+
+
+class TranscriptionEngine(Protocol):
+    """What the pipeline needs from an engine: faster-whisper or OpenVINO."""
+
+    def load(self, on_status: StatusCallback | None = None) -> None: ...
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        duration: float = 0.0,
+        on_segment: SegmentCallback | None = None,
+        should_cancel: CancelCheck | None = None,
+        start_at: float = 0.0,
+    ) -> TranscriptionResult: ...
+
+    def unload(self) -> None: ...
 
 
 def _resolve_device(requested: str) -> list[tuple[str, str]]:
@@ -273,6 +364,9 @@ class WhisperEngine:
             # Word times are what let a line be cut where the sentence ends,
             # instead of wherever the decoder happened to stop (§10).
             word_timestamps=self.options.sentence_lines,
+            # Given before every window, unlike initial_prompt, which only
+            # reaches the first one when previous text is not carried over.
+            hotwords=self.options.keywords or None,
         )
 
         total = duration or offset + float(getattr(info, "duration", 0.0) or 0.0)
@@ -344,6 +438,10 @@ class WhisperEngine:
 
     def unload(self) -> None:
         self._model = None
+
+    def note_fallback(self, note: str) -> None:
+        """Record that this engine stands in for the one the user asked for."""
+        self._fallback_note = f"{note}\n\n{self._fallback_note}" if self._fallback_note else note
 
 
 def _words_of(item: object, offset: float) -> list[Word]:

@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.alignment import Alignment, align
+from ..core.models import StageStatus
 from ..core.project import Project
 from ..core.search import SearchHit, search_lecture
 from ..core.slides import SlideAppearance, SlideSet
@@ -72,6 +73,26 @@ TAB_SLIDE = 0
 TAB_FULL = 1
 TAB_SEARCH = 2
 PREVIEW_HEIGHT = 150
+
+
+def _transcription_choices(
+    project: Project, defaults: dict[str, object] | None
+) -> dict[str, object]:
+    """What the transcription options should show for ``project``.
+
+    A lecture that has been transcribed shows what it was transcribed with. One
+    that never has starts from the last choices made on any lecture, since its
+    own stored settings are only the untouched defaults.
+    """
+    settings = project.meta.transcription
+    if project.stage_status("transcription") is StageStatus.NOT_STARTED:
+        return {**(defaults or {}), "keywords": settings.keywords}
+    return {
+        "model_size": settings.model_size,
+        "language": settings.language,
+        "vad_filter": settings.vad_filter,
+        "keywords": settings.keywords,
+    }
 
 
 class ElidedLabel(QLabel):
@@ -514,7 +535,11 @@ class LectureView(QWidget):
 
     # -- project binding ----------------------------------------------------
 
-    def load_project(self, project: Project) -> None:
+    def load_project(
+        self, project: Project, transcription_defaults: dict[str, object] | None = None
+    ) -> None:
+        """Show ``project``. ``transcription_defaults`` are the last options
+        chosen on any lecture, for one that has never been transcribed."""
         self._project = project
         video = project.video
 
@@ -529,13 +554,7 @@ class LectureView(QWidget):
         self._subtitle_label.setText("  •  ".join(details))
 
         self._panel.set_video_duration(video.duration)
-        self._panel.set_defaults(
-            {
-                "model_size": project.meta.transcription.model_size,
-                "language": project.meta.transcription.language,
-                "vad_filter": project.meta.transcription.vad_filter,
-            }
-        )
+        self._panel.set_defaults(_transcription_choices(project, transcription_defaults))
 
         if project.video_missing:
             self._warning_label.setText(

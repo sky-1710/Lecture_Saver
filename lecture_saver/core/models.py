@@ -272,6 +272,9 @@ STAGE_KEYS = ("audio", "transcription", "slides", "alignment")
 @dataclass
 class TranscriptionSettings:
     model_size: str = "small"
+    #: ``"auto"`` goes by the model: Turbo runs on OpenVINO, the rest on
+    #: faster-whisper.
+    engine: str = "auto"
     device: str = "auto"
     compute_type: str = "auto"
     #: ``"auto"`` lets Whisper detect; ``"ko"``/``"en"`` force a language, which
@@ -279,20 +282,26 @@ class TranscriptionSettings:
     language: str = "auto"
     vad_filter: bool = True
     beam_size: int = 5
+    #: Course terms given to Whisper as spelling hints, comma-separated.
+    keywords: str = ""
     #: What actually ran, filled in after transcription.
     detected_language: str | None = None
+    resolved_engine: str | None = None
     resolved_device: str | None = None
     resolved_compute_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "model_size": self.model_size,
+            "engine": self.engine,
             "device": self.device,
             "compute_type": self.compute_type,
             "language": self.language,
             "vad_filter": self.vad_filter,
             "beam_size": self.beam_size,
+            "keywords": self.keywords,
             "detected_language": self.detected_language,
+            "resolved_engine": self.resolved_engine,
             "resolved_device": self.resolved_device,
             "resolved_compute_type": self.resolved_compute_type,
         }
@@ -301,12 +310,15 @@ class TranscriptionSettings:
     def from_dict(cls, data: dict[str, Any]) -> TranscriptionSettings:
         return cls(
             model_size=str(data.get("model_size", "small")),
+            engine=str(data.get("engine", "auto")),
             device=str(data.get("device", "auto")),
             compute_type=str(data.get("compute_type", "auto")),
             language=str(data.get("language", "auto")),
             vad_filter=bool(data.get("vad_filter", True)),
             beam_size=int(data.get("beam_size", 5)),
+            keywords=str(data.get("keywords", "") or ""),
             detected_language=data.get("detected_language"),
+            resolved_engine=data.get("resolved_engine"),
             resolved_device=data.get("resolved_device"),
             resolved_compute_type=data.get("resolved_compute_type"),
         )

@@ -198,6 +198,37 @@ def test_audio_extraction_is_reused_on_a_second_run(transcribed):
     assert any("earlier" in message for message in updates)
 
 
+def test_turbo_runs_on_openvino(tmp_path, lecture_video):
+    """The Turbo model through OpenVINO, end to end.
+
+    Only when its 830 MB model is already downloaded - a test should not start
+    that download on its own.
+    """
+    pytest.importorskip("openvino_genai")
+    from huggingface_hub import snapshot_download
+
+    from lecture_saver.transcription.openvino_engine import OPENVINO_MODELS
+    from lecture_saver.transcription.whisper_engine import ENGINE_OPENVINO, TURBO_MODEL
+
+    try:
+        snapshot_download(OPENVINO_MODELS[TURBO_MODEL], local_files_only=True)
+    except Exception:  # noqa: BLE001
+        pytest.skip("the Turbo model is not downloaded")
+
+    video, has_speech = lecture_video
+    project = Project.create(tmp_path / "turbo", "Turbo", probe_video(video))
+    result = TranscriptionPipeline(
+        project, WhisperOptions(model_size=TURBO_MODEL, language="en")
+    ).run()
+
+    assert result.engine == ENGINE_OPENVINO
+    assert result.device in ("gpu", "cpu")
+    assert project.meta.transcription.resolved_engine == ENGINE_OPENVINO
+    if has_speech:
+        text = " ".join(s.effective_text for s in project.transcript.segments).lower()
+        assert "machine learning" in text
+
+
 def test_cancelling_before_work_starts_raises_cancelled(tmp_path, lecture_video):
     from lecture_saver.media.errors import Cancelled
 

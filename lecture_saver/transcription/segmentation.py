@@ -21,9 +21,15 @@ Rules, in order:
   what follows.
 * A silence of :data:`PAUSE` or more ends the line too. The lecturer stopped;
   wherever that is, it is a real break.
-* Failing both, a line is closed at :data:`MAX_SECONDS` so speech that is never
-  punctuated cannot become one enormous paragraph. The cut is taken at the last
-  comma if there is one, else at the longest silence inside the line.
+* A word marked :attr:`Word.ends_chunk` ends the line, under the same minimum
+  length as a full stop. Some engines (OpenVINO) give word times with no gaps
+  between them, so the silence rule never fires; where Whisper chose to end one
+  of its own lines is the nearest thing to a pause they offer.
+* Failing all of those, a line is closed at :data:`MAX_SECONDS` so speech that
+  is never punctuated cannot become one enormous paragraph. The cut is taken at
+  the last comma if there is one, else at the longest silence inside the line -
+  but never in the first half of the line, so a cut cannot leave a one-word
+  scrap behind it.
 """
 
 from __future__ import annotations
@@ -65,6 +71,9 @@ class Word:
     text: str
     start: float
     end: float
+    #: Whisper ended one of its own lines after this word. Only set by engines
+    #: whose word times carry no silences.
+    ends_chunk: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,7 +133,7 @@ class SentenceSegmenter:
             self._pending.append(word)
             duration = self._pending[-1].end - self._pending[0].start
 
-            if _ends_sentence(word) and duration >= self._min:
+            if (_ends_sentence(word) or word.ends_chunk) and duration >= self._min:
                 lines.append(self._take(len(self._pending)))
             elif duration > self._max:
                 lines.append(self._take(self._cut_point()))
@@ -148,17 +157,27 @@ class SentenceSegmenter:
         """Where to cut an over-long line: a clause end, else the longest gap.
 
         Never the very last word - that would leave nothing pending and cut the
-        following sentence off from its start.
+        following sentence off from its start. Never in the first half of the
+        line either: a cut there leaves a scrap of a line, and a remainder still
+        over the limit, which the next word would cut again - one word at a
+        time, when word times have no gaps to choose between.
         """
         words = self._pending
-        for index in range(len(words) - 2, 0, -1):
+        half = words[0].start + self._max / 2
+        earliest = next(
+            (index for index in range(1, len(words)) if words[index].start >= half),
+            len(words) - 1,
+        )
+
+        for index in range(len(words) - 2, max(1, earliest - 1) - 1, -1):
             if _ends_clause(words[index]):
                 return index + 1
 
         best_index, best_gap = len(words) - 1, -1.0
-        for index in range(1, len(words)):
+        for index in range(max(1, earliest), len(words)):
             gap = words[index].start - words[index - 1].end
-            if gap > best_gap:
+            # Ties go to the later word: the longer line, the shorter remainder.
+            if gap >= best_gap:
                 best_index, best_gap = index, gap
         return best_index
 

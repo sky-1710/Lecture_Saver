@@ -20,6 +20,13 @@ PySide6-Addons>=6.8,<6.10
 # machine with no CUDA GPU.
 faster-whisper>=1.1.0
 
+# Intel's inference runtime. Runs the Turbo model (Whisper large-v3-turbo) on an
+# Intel integrated GPU - which CTranslate2 cannot use - about four times faster
+# than faster-whisper's medium on the CPU. Local only; its model is a one-time
+# Hugging Face download like the others. If it is missing, Turbo falls back to
+# faster-whisper.
+openvino-genai>=2026.4,<2027
+
 # --- Slide detection --------------------------------------------------------
 # All frame comparison (perceptual hashing, per-cell SSIM, grid change maps) is
 # plain NumPy. OpenCV is deliberately not used: FFmpeg already does the
