@@ -7,6 +7,13 @@ browser-based one.
 The widget owns playback state and exposes it as signals; it knows nothing
 about transcripts or slides, so the synchronisation policy lives in
 ``lecture_view.py`` where it can be changed in one place (§12).
+
+Space plays and pauses from anywhere in the window, as in any media player.
+It is a window shortcut rather than a key handler on the widget, so it works
+whatever was clicked last - a slide, a transcript row, a button - while text
+boxes still get their spaces: Qt lets a focused text input claim a key before
+any shortcut sees it, so typing in a segment, the search field or the find bar
+is untouched.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -71,6 +79,7 @@ class VideoPlayer(QWidget):
         self._scrubbing = False
 
         self._build_controls()
+        self._build_shortcuts()
         self._connect()
 
     # -- construction -------------------------------------------------------
@@ -104,6 +113,7 @@ class VideoPlayer(QWidget):
         self._rate_box.setCurrentIndex(PLAYBACK_RATES.index(1.0))
         self._rate_box.setFixedWidth(72)
         self._rate_box.setToolTip("Playback speed")
+        self._play_button.setToolTip("Play or pause (Space)")
 
         # The transport sits on its own card under the picture, in two rows:
         # the scrubber keeps its full width however narrow the pane gets.
@@ -136,8 +146,17 @@ class VideoPlayer(QWidget):
         layout.addWidget(self._video, 1)
         layout.addWidget(self._controls)
 
+    def _build_shortcuts(self) -> None:
+        self._play_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self._play_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        # Holding Space down would otherwise flicker between play and pause.
+        self._play_shortcut.setAutoRepeat(False)
+        # Off until there is a video, so Space keeps its usual meaning then.
+        self._play_shortcut.setEnabled(False)
+
     def _connect(self) -> None:
         self._play_button.clicked.connect(self.toggle_play)
+        self._play_shortcut.activated.connect(self.toggle_play)
         self._back_button.clicked.connect(lambda: self.skip(-SEEK_STEP_MS / 1000))
         self._forward_button.clicked.connect(lambda: self.skip(SEEK_STEP_MS / 1000))
         self._rate_box.currentIndexChanged.connect(self._on_rate_changed)
@@ -157,6 +176,7 @@ class VideoPlayer(QWidget):
         self._player.setSource(QUrl.fromLocalFile(str(Path(path).resolve())))
         for widget in (self._play_button, self._back_button, self._forward_button, self._slider):
             widget.setEnabled(True)
+        self._play_shortcut.setEnabled(True)
 
     def clear(self) -> None:
         self._player.stop()
@@ -164,6 +184,7 @@ class VideoPlayer(QWidget):
         self._duration_s = 0.0
         for widget in (self._play_button, self._back_button, self._forward_button, self._slider):
             widget.setEnabled(False)
+        self._play_shortcut.setEnabled(False)
         self._slider.setRange(0, 0)
         self._time_label.setText("00:00 / 00:00")
 

@@ -1892,3 +1892,80 @@ class TestLineByLineTranslation:
         view.refresh_translations()
         index = view._transcript.model().index(0, 0)
         assert delegate.sizeHint(option, index).height() > before
+
+
+# --------------------------------------------------------------------------
+# Space plays and pauses (§12)
+# --------------------------------------------------------------------------
+
+
+class TestSpaceKey:
+    """Space toggles playback whatever was clicked last, except in a text box.
+
+    ``play`` and ``pause`` are replaced with recorders: the test is about which
+    key reaches the player, and a real play would sound the test tone.
+    """
+
+    @pytest.fixture
+    def calls(self, editing_view, monkeypatch):
+        calls: list[str] = []
+        media = editing_view._player._player
+        monkeypatch.setattr(media, "play", lambda: calls.append("play"))
+        monkeypatch.setattr(media, "pause", lambda: calls.append("pause"))
+        editing_view.activateWindow()
+        QApplication.processEvents()
+        return calls
+
+    def _press_space(self, widget):
+        from PySide6.QtTest import QTest
+
+        widget.setFocus()
+        QApplication.processEvents()
+        QTest.keyClick(widget, Qt.Key.Key_Space)
+        QApplication.processEvents()
+
+    def test_space_plays_from_the_transcript_list(self, editing_view, calls):
+        self._press_space(editing_view._transcript)
+        assert calls == ["play"]
+
+    def test_space_plays_from_the_slide_list(self, editing_view, calls):
+        self._press_space(editing_view._slides_pane._list)
+        assert calls == ["play"]
+
+    def test_space_on_a_focused_checkbox_plays_instead_of_toggling_it(
+        self, editing_view, calls
+    ):
+        follow = editing_view._follow_check
+        self._press_space(follow)
+        assert calls == ["play"]
+        assert follow.isChecked()
+
+    def test_space_pauses_while_playing(self, editing_view, calls, monkeypatch):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        media = editing_view._player._player
+        monkeypatch.setattr(
+            media, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState
+        )
+        self._press_space(editing_view._transcript)
+        assert calls == ["pause"]
+
+    def test_space_typed_into_a_segment_is_a_space(
+        self, editing_view, calls, project_with_slides
+    ):
+        from PySide6.QtTest import QTest
+
+        editor = _open_editor(editing_view, "segment_001")
+        editor.setFocus()
+        QTest.keyClicks(editor, " ok")
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+
+        assert calls == []
+        assert project_with_slides.transcript.get("segment_001").effective_text.endswith(
+            " ok"
+        )
+
+    def test_space_does_nothing_without_a_video(self, editing_view, calls):
+        editing_view._player.clear()
+        self._press_space(editing_view._transcript)
+        assert calls == []
