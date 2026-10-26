@@ -34,6 +34,13 @@ Every flag there is load-bearing:
     for every run and fail if they need authorising. Translating needs no
     tools, so the whole file is skipped. Their sign-in is not in it - auth
     comes from ``CODEX_HOME`` and still applies.
+``-m MODEL``
+    Always passed. Without it Codex falls back to a built-in default that a
+    ChatGPT sign-in may not be allowed to use ("not supported when using
+    Codex with a ChatGPT account"). The user's own default is usually their
+    most capable model, which burns through their quota on a long lecture,
+    so an affordable one is chosen from the models Codex lists for them
+    (see :func:`pick_model`).
 
 Both stdin and the answer file are UTF-8 explicitly: the Windows default is
 cp949 here, which mangles Korean.
@@ -75,6 +82,10 @@ BATCH_TIMEOUT_SECONDS = 900
 
 #: How often the wait loop looks at the cancel flag.
 POLL_SECONDS = 0.2
+
+#: Models used when the user chose none, cheapest first. Translation needs no
+#: frontier reasoning, and a lecture is many batches.
+AFFORDABLE_MODELS = ("gpt-6-luna", "gpt-5.6-luna")
 
 
 def _no_window() -> dict[str, Any]:
@@ -130,6 +141,32 @@ def find_codex(override: str | Path | None = None) -> Path | None:
     return bundled[0] if bundled else None
 
 
+def codex_home() -> Path:
+    """Where Codex keeps its sign-in and caches: ``CODEX_HOME`` or ``~/.codex``."""
+    env = os.environ.get("CODEX_HOME")
+    return Path(env) if env else Path.home() / ".codex"
+
+
+def pick_model(home: Path | None = None) -> str:
+    """The first of :data:`AFFORDABLE_MODELS` this account can use.
+
+    Codex caches the models the signed-in account offers in
+    ``models_cache.json``. When that file is missing or unreadable the first
+    choice is used anyway: leaving ``-m`` off is known to fail.
+    """
+    cache = (home or codex_home()) / "models_cache.json"
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        offered = {m.get("slug") for m in data.get("models", []) if isinstance(m, dict)}
+    except (OSError, ValueError, AttributeError):
+        log.info("No readable Codex model list at %s", cache)
+        return AFFORDABLE_MODELS[0]
+    for slug in AFFORDABLE_MODELS:
+        if slug in offered:
+            return slug
+    return AFFORDABLE_MODELS[0]
+
+
 @dataclass
 class CodexEngine(TranslationEngine):
     """Runs one batch per call. Holds no state between batches.
@@ -145,8 +182,10 @@ class CodexEngine(TranslationEngine):
 
     #: Explicit path to the program, when the user set one.
     binary: str | Path | None = None
-    #: Passed to ``-m``. Empty means whatever Codex is configured to use.
+    #: Passed to ``-m``. Empty means an affordable one, see :func:`pick_model`.
     model: str = ""
+    #: Where Codex's model list is read from; ``None`` is :func:`codex_home`.
+    home: Path | None = None
     timeout: int = BATCH_TIMEOUT_SECONDS
 
     def resolve(self) -> Path:
@@ -203,8 +242,7 @@ class CodexEngine(TranslationEngine):
             # The model is held to this JSON schema, so the answer is data to
             # validate rather than prose to scrape.
             cmd += ["--output-schema", str(schema_file)]
-        if self.model:
-            cmd += ["-m", self.model]
+        cmd += ["-m", self.model or pick_model(self.home)]
         # A trailing "-" tells Codex the prompt arrives on stdin.
         return [*cmd, "-"]
 
@@ -326,6 +364,14 @@ class CodexEngine(TranslationEngine):
                 "the one installed.\n\n"
                 "Update Codex (run 'codex update', or update the ChatGPT "
                 "extension in VS Code), or set a different model in Settings."
+            )
+        if "not supported when using codex with a chatgpt account" in combined:
+            return TranslationError(
+                "The model this translation asked for cannot be used with a "
+                "ChatGPT sign-in.\n\n"
+                "Set \"translate_model\" in %APPDATA%\\LectureSaver\\settings.json "
+                f"to one your account offers (for example {AFFORDABLE_MODELS[0]})."
+                f"\n\n{tail}"
             )
         limited = ("rate limit", "usage limit", "quota", "429", "too many requests")
         if any(word in combined for word in limited):

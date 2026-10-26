@@ -356,11 +356,28 @@ class TestCodexEngine:
         )
         assert command[command.index("-m") + 1] == "gpt-5.1"
 
-    def test_no_model_is_forced_when_none_was_chosen(self, tmp_path):
+    def test_an_affordable_model_is_chosen_when_none_was(self, tmp_path):
+        """Codex's own default can be refused for a ChatGPT sign-in."""
+        import json
+
         from lecture_saver.translate.codex_cli import CodexEngine
 
-        command = CodexEngine()._command(tmp_path / "codex.exe", tmp_path / "answer.md")
-        assert "-m" not in command
+        (tmp_path / "models_cache.json").write_text(
+            json.dumps({"models": [{"slug": "gpt-6-astra"}, {"slug": "gpt-5.6-luna"}]}),
+            encoding="utf-8",
+        )
+        command = CodexEngine(home=tmp_path)._command(
+            tmp_path / "codex.exe", tmp_path / "answer.md"
+        )
+        assert command[command.index("-m") + 1] == "gpt-5.6-luna"
+
+    def test_a_model_is_passed_even_without_a_model_list(self, tmp_path):
+        from lecture_saver.translate.codex_cli import AFFORDABLE_MODELS, CodexEngine
+
+        command = CodexEngine(home=tmp_path / "missing")._command(
+            tmp_path / "codex.exe", tmp_path / "answer.md"
+        )
+        assert command[command.index("-m") + 1] == AFFORDABLE_MODELS[0]
 
     def test_the_answer_is_read_from_the_file_not_the_chatter(self, tmp_path):
         from lecture_saver.translate.codex_cli import CodexEngine
@@ -385,6 +402,11 @@ class TestCodexEngine:
             (
                 "The 'gpt-5.6-sol' model requires a newer version of Codex.",
                 "update codex",
+            ),
+            (
+                "The 'gpt-5.4' model is not supported when using Codex with a "
+                "ChatGPT account.",
+                "chatgpt sign-in",
             ),
             ("panic: something else", "exit code"),
         ],
