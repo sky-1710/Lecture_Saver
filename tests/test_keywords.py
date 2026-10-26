@@ -21,6 +21,21 @@ def lecture(*slides):
     return extract_keywords(list(slides))
 
 
+def aside(n):
+    """A line of two words no other line has, nothing like any other line."""
+    def word(k):
+        return chr(0xAC00 + k * 397 % 11172) + chr(0xAC00 + k * 1009 % 11172)
+
+    return f"{word(2 * n)} {word(2 * n + 1)}"
+
+
+def others(count, start=100):
+    """Slides on other topics, none like another. Enough of them keep a slide's
+    versions under half the lecture, where a line would be a header or footer
+    when versions are told apart."""
+    return [slide(aside(start + 2 * i), aside(start + 2 * i + 1)) for i in range(count)]
+
+
 class TestTerms:
     def test_a_heading_and_a_recurring_phrase_lead(self):
         terms = lecture(
@@ -86,6 +101,45 @@ class TestTerms:
         assert "Jane Doe University" not in terms
         assert "Jane Doe" not in terms
 
+    def test_a_titled_heading_of_three_words_seen_once_is_a_term(self):
+        terms = lecture(slide(("System Call Interface", TITLE), "for user programs"),
+                        *others(3))
+        assert "System Call Interface" in terms
+
+    def test_a_word_inside_a_longer_term_gives_it_its_place(self):
+        # "Execution" heads five slides - more than the term holding it, but
+        # not three times as many: the longer term takes its place at the top.
+        slides = [slide(("Execution", TITLE), aside(n), aside(n + 10)) for n in range(3)]
+        slides += [slide(("Limited Direct Execution", TITLE), aside(n)) for n in range(20, 22)]
+        terms = lecture(*slides)
+        assert terms[0] == "Limited Direct Execution"
+        assert "Execution" not in terms and "Direct Execution" not in terms
+
+    def test_a_word_on_many_more_slides_is_a_term_of_its_own(self):
+        slides = [slide("a system call", aside(n)) for n in range(6)]
+        terms = lecture(*slides, slide(("System Call Interface", TITLE)), *others(3))
+        assert "system call" in terms and "System Call Interface" in terms
+
+    def test_the_same_words_in_another_order_are_a_figure_read_across(self):
+        slides = [slide("the system call", aside(n)) for n in range(6)]
+        slides += [slide("call system call", aside(n)) for n in range(10, 12)]
+        terms = lecture(*slides, *others(4))
+        assert "system call" in terms
+        assert "call system" not in terms
+
+    def test_a_subject_and_its_verb_are_not_a_term(self):
+        slides = [slide("when an interrupt occurs", "an interrupt caused by I/O", aside(n))
+                  for n in range(3)]
+        terms = lecture(*slides, *others(4))
+        assert not any(term.endswith(("occurs", "caused")) for term in terms)
+        assert "occurs" not in terms
+
+    def test_a_step_in_a_procedure_is_not_a_term(self):
+        slides = [slide("initialize trap table", aside(n)) for n in range(3)]
+        terms = lecture(*slides, *others(4))
+        assert "trap table" in terms
+        assert "initialize trap table" not in terms
+
     def test_most_terms_returned_is_capped(self):
         slides = [slide(*[f"term{a}{b} phrase{a}{b}" for b in "abcdefghij"])
                   for a in "abcdefghij"] * 2
@@ -94,6 +148,44 @@ class TestTerms:
     def test_nothing_in_nothing_out(self):
         assert lecture() == []
         assert lecture(slide()) == []
+
+
+class TestVersionsOfOneSlide:
+    """The professor's notes, a pop-up or a build make one slide several images."""
+
+    def test_versions_of_one_slide_count_once(self):
+        # Six versions of the slide the professor wrote on no longer outweigh
+        # a term on four slides of its own.
+        written_on = [slide("the console interrupt", "from either side")] * 6
+        elsewhere = [slide("the trap table", aside(n)) for n in range(4)]
+        terms = lecture(*written_on, *elsewhere, *others(4))
+        assert terms.index("trap table") < terms.index("console interrupt")
+
+    def test_a_slide_written_on_at_length_keeps_its_terms(self):
+        # Seen once, a phrase could be an OCR accident; read alike on three
+        # versions of a slide it is not.
+        terms = lecture(*[slide("gradient descent finds the minimum")] * 3, *others(4))
+        assert "gradient descent" in terms
+
+    def test_a_word_a_pen_stroke_cut_short_is_dropped(self):
+        def interrupt_slide(event):
+            return slide(("Interrupt and trap", TITLE), event, "raised by an I/O device")
+
+        clean = interrupt_slide("Unexpected external event")
+        inked = interrupt_slide("Unexpecte externa event")
+        terms = lecture(clean, *[inked] * 5, *others(7))
+        words = " ".join(terms).split()
+        assert "Unexpecte" not in words and "externa" not in words
+
+    def test_a_plural_on_another_version_is_no_cut(self):
+        terms = lecture(slide("the test set"), slide("test sets"), slide("a test set"))
+        assert "test set" in terms
+
+    def test_slides_sharing_a_heading_are_not_versions(self):
+        slides = [slide(("Paging", TITLE), f"{topic} page table", f"{topic} lookup")
+                  for topic in ("inverted", "hashed", "linear")]
+        terms = lecture(*slides, *others(3))
+        assert "page table" in terms
 
 
 class TestOcrRepairs:
@@ -130,6 +222,36 @@ class TestOcrRepairs:
         terms = lecture(*slides)
         assert "page table" in terms
         assert not any(term.startswith("age") for term in terms)
+
+    def test_an_ing_read_as_lng_is_put_back(self):
+        terms = lecture(*[slide("parallel processlng units")] * 3)
+        assert "parallel processing units" in terms or "parallel processing" in terms
+        assert not any("processlng" in term for term in terms)
+
+    def test_a_contraction_is_a_stop_word(self):
+        terms = lecture(*[slide("the OS wouldn't be in control")] * 3)
+        assert not any("wouldn't" in term for term in terms)
+
+    def test_a_hyphenated_phrase_needs_two_slides_like_any_phrase(self):
+        terms = lecture(slide("a return-from-trap instruction"), slide("then return-from-trap"),
+                        *others(2))
+        assert "return-from-trap" in terms
+
+    def test_a_clipped_compound_is_dropped(self):
+        slides = [slide("the return-from-trap")] * 3 + [slide("the return-from-tra")] * 2
+        assert "return-from-tra" not in lecture(*slides)
+
+    def test_letters_joined_by_a_hyphen_are_maths(self):
+        assert "x-m" not in lecture(*[slide("the distance x-m squared")] * 3)
+
+    def test_a_digit_after_an_acronym_read_as_a_letter_is_dropped(self):
+        terms = lecture(*[slide("save state into PCBI, reload state from PCB")] * 3)
+        assert "PCB" in terms
+        assert "PCBI" not in terms
+
+    def test_a_conditional_bar_between_words_is_maths(self):
+        terms = lecture(*[slide("P(TrafficIRain) and P(UmbrellaIRain)")] * 3)
+        assert not any("Rain" in term for term in terms)
 
     def test_pictures_and_small_print_are_ignored(self):
         terms = lecture(*[slide(("별-수 그림", 0.29), ("tiny figure label", 0.008),

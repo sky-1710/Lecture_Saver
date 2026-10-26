@@ -261,10 +261,20 @@ their height. `core/keywords.py` - pure, tested on made-up OCR text - turns
 those into terms, RAKE-style: phrases cut at stop words and punctuation, scored
 by the slides they appear on, doubled in headings (lines ≥1.5x the median
 height), multi-word terms preferred, generic words ("data", "time") only inside a
-phrase, text on ≥75 % of slides dropped as header/footer. Most of the module is
-undoing OCR: a Korean recogniser reads Latin text with its own confusions
-("SpIitting", "tO", "PIOts", P(X|Y) as "XIY"), pictures as Hangul, and text
-under a pop-up in part ("age table"); Hangul words one syllable off a commoner
+phrase, text on ≥75 % of slides dropped as header/footer. Consecutive slide
+images whose lines mostly match (a slide kept before/with/after the professor's
+ink, a build) are versions of one slide: it scores once, plus `log2` of its
+versions for the time spent on it - without that, one slide written on in six
+images put its sentence fragments at the top - while a phrase read alike on
+several versions still counts as read right. A word shorter on one version
+than in the same line on another ("Unexpecte externa event") was cut by ink and
+is dropped. Phrases ending in a verb ("interrupt occurs", "-ed") or starting a
+procedure step ("initialize trap table") are not terms, and a term inside a
+longer ranked one gives it its place unless it is on ≥3x the slides. Most of
+the module is undoing OCR: a Korean recogniser reads Latin text with its own
+confusions ("SpIitting", "tO", "PIOts", "processlng", P(X|Y) as "XIY" or
+"TrafficlRain", PCB1 as "PCBI"), pictures as Hangul, and text under a pop-up in
+part ("age table", "return-from-tra"); Hangul words one syllable off a commoner
 word (샴표/상표) are taken as misreadings. The terms go into the Keywords box,
 after what was typed, for the user to check.
 

@@ -190,6 +190,9 @@ Windows (local, offline, nothing to download — about 0.2 s a slide), and the
 terms it uses are added after anything you typed — headings and phrases shown on
 several slides first (`ROC Curve, Cross Validation, False positive rate, AUC,
 leave-one-out cross validation, …`), headers and footers on every slide left out.
+A slide kept as several images while the professor writes on it counts as one
+slide, words a pen stroke cut short ("externa") are dropped, and a word already
+inside a longer term ("Direct" in "Limited Direct Execution") is not repeated.
 On a Korean lecture about English slides this fixed "크루스 밸리데이션" and
 "배리데이션 셋", and the transcript kept phrases it had dropped without the
 hints; the terms then come out spelled as on the slides ("Validation set").
