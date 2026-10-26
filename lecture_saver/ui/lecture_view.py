@@ -56,6 +56,7 @@ from ..core.slides import SlideAppearance, SlideSet
 from ..core.timecode import format_duration, format_hms
 from ..core.transcript_store import TextMatch, TranscriptEditError, TranscriptStore
 from ..export.document import pair_timed_translation
+from ..slides.slide_text import unavailable_reason
 from ..transcription.resume import resume_point
 from ..transcription.whisper_engine import WhisperOptions
 from .find_bar import FindBar
@@ -73,6 +74,26 @@ TAB_SLIDE = 0
 TAB_FULL = 1
 TAB_SEARCH = 2
 PREVIEW_HEIGHT = 150
+
+
+def slide_images(project: Project) -> list[Path]:
+    """The image of every distinct slide that has one on disk."""
+    return [
+        path for path in (
+            slide.image_path(project.root) for slide in project.slides.slides if slide.image
+        )
+        if path.is_file()
+    ]
+
+
+def _slide_keywords_state(project: Project) -> tuple[bool, str]:
+    """Whether terms can be read off this lecture's slides, and why not."""
+    reason = unavailable_reason()
+    if reason:
+        return False, reason
+    if not slide_images(project):
+        return False, "Detect slides first, then the terms on them can be read."
+    return True, ""
 
 
 def _transcription_choices(
@@ -137,6 +158,8 @@ class LectureView(QWidget):
     #: Continue an unfinished transcription.
     resumeTranscriptionRequested = Signal(object)  # WhisperOptions
     cancelRequested = Signal()
+    #: Read the slides' text and fill the transcription keywords from it.
+    keywordsFromSlidesRequested = Signal()
     #: Emitted when the user asks to detect slides.
     detectSlidesRequested = Signal()
     cancelSlidesRequested = Signal()
@@ -485,6 +508,7 @@ class LectureView(QWidget):
         self._panel.startRequested.connect(self.transcribeRequested)
         self._panel.resumeRequested.connect(self.resumeTranscriptionRequested)
         self._panel.cancelRequested.connect(self.cancelRequested)
+        self._panel.keywordsFromSlidesRequested.connect(self.keywordsFromSlidesRequested)
         self._relocate_button.clicked.connect(self.relocateRequested)
         self._quick_export_button.clicked.connect(self.quickExportRequested)
         self._study_pack_button.clicked.connect(self.studyPackRequested)
@@ -599,6 +623,7 @@ class LectureView(QWidget):
         self._slides_pane.set_slides(self._project.slides, self._project.root)
         self._preview_cache.clear()
         self._rebind()
+        self._panel.set_slide_keywords_available(*_slide_keywords_state(self._project))
 
     def close_project(self) -> None:
         self._project = None
@@ -607,6 +632,7 @@ class LectureView(QWidget):
         self._line_translations = {}
         self._transcript.set_translations({})
         self._slides_pane.set_slides(SlideSet(), Path())
+        self._panel.set_slide_keywords_available(False)
         self._alignment = Alignment((), ())
         self._appearance_starts = []
         self._shown = -1

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QRect, Qt, QThread, QUrl
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import Settings, icloud_drive_dir, log_file
+from ..core.keywords import TextLine, extract_keywords
 from ..core.models import VideoInfo
 from ..core.project import Project, ProjectError, is_project_dir
 from ..core.slides import (
@@ -45,9 +48,10 @@ from ..export.options import ExportFormat, ExportSettings, resolve_output_dir
 from ..media.errors import FFmpegNotFoundError, MediaError
 from ..media.ffmpeg_tools import VIDEO_FILE_FILTER, find_ffmpeg, find_ffprobe
 from ..slides.pipeline import capture_slide_image
-from ..transcription.whisper_engine import WhisperOptions
+from ..slides.slide_text import SlideTextReader
+from ..transcription.whisper_engine import WhisperOptions, normalize_keywords
 from .autosave import Autosave
-from .lecture_view import LectureView
+from .lecture_view import LectureView, slide_images
 from .start_view import StartView
 from .theme import Role, set_role
 from .workers import (
@@ -61,6 +65,15 @@ from .workers import (
 log = logging.getLogger(__name__)
 
 __all__ = ["MainWindow"]
+
+
+@dataclass(frozen=True)
+class _SlideKeywords:
+    """What reading a lecture's slides found."""
+
+    root: Path
+    terms: list[str]
+    slides: int
 
 
 class MainWindow(QMainWindow):
@@ -77,6 +90,9 @@ class MainWindow(QMainWindow):
         self._slides_worker: SlideDetectionWorker | None = None
         self._export_thread: QThread | None = None
         self._export_worker: JobWorker | None = None
+        self._keywords_thread: QThread | None = None
+        self._keywords_worker: JobWorker | None = None
+        self._keywords_cancel = threading.Event()
         #: Whether the export in flight is the AI translation request. Kept here
         #: rather than captured in a lambda - see _run_export_job.
         self._export_is_ai_request = False
@@ -248,6 +264,7 @@ class MainWindow(QMainWindow):
             lambda options: self._start_transcription(options, resume=True)
         )
         self._lecture_view.cancelRequested.connect(self._cancel_transcription)
+        self._lecture_view.keywordsFromSlidesRequested.connect(self._read_slide_keywords)
         self._lecture_view.relocateRequested.connect(self._relocate_video)
         self._lecture_view.detectSlidesRequested.connect(self._start_slide_detection)
         self._lecture_view.cancelSlidesRequested.connect(self._cancel_slide_detection)
@@ -409,6 +426,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_stop_transcription():
             return
         self._wait_for_export()
+        self._stop_reading_keywords()
         self._flush_edits()
         if self.project is not None:
             try:
@@ -545,6 +563,85 @@ class MainWindow(QMainWindow):
             f"Cancelled. {count} segments were kept." if count else "Cancelled."
         )
         self.statusBar().showMessage("Transcription cancelled", 6000)
+
+    # -- keywords from the slides --------------------------------------------
+
+    def _read_slide_keywords(self) -> None:
+        """Read the slides' text in the background and add its terms (§26)."""
+        if self.project is None or self._keywords_thread is not None:
+            return
+        images = slide_images(self.project)
+        if not images:
+            return
+        root = self.project.root
+        cancel = self._keywords_cancel
+        cancel.clear()
+
+        def job(report: Callable[[str, float], None]) -> object:
+            # Windows' OCR objects belong to the thread that made them.
+            reader = SlideTextReader()
+            slides: list[list[TextLine]] = []
+            for index, image in enumerate(images):
+                if cancel.is_set():
+                    break
+                report(f"Reading slide {index + 1} of {len(images)}...", index / len(images))
+                try:
+                    slides.append(reader.read(image))
+                except Exception:  # noqa: BLE001 - one unreadable image is not the lecture
+                    log.warning("Could not read the text on %s", image, exc_info=True)
+            return _SlideKeywords(root, extract_keywords(slides), len(slides))
+
+        self._lecture_view.panel.begin_keyword_scan()
+        self._keywords_thread = QThread(self)
+        self._keywords_worker = JobWorker(job)
+        # Bound methods, not lambdas, so they run on the UI thread (see the
+        # export job above).
+        self._keywords_worker.progress.connect(self._on_keywords_progress)
+        self._keywords_worker.finished.connect(self._on_keywords_read)
+        run_in_thread(self._keywords_worker, self._keywords_thread)
+
+    def _on_keywords_progress(self, stage: str, fraction: float) -> None:
+        self._lecture_view.panel.update_keyword_scan(stage)
+
+    def _on_keywords_read(self, result: object) -> None:
+        self._finish_reading_keywords()
+        panel = self._lecture_view.panel
+        if isinstance(result, Exception):
+            panel.end_keyword_scan([], f"The slides could not be read: {result}")
+            return
+        assert isinstance(result, _SlideKeywords)
+        if self.project is None or self.project.root != result.root:
+            panel.end_keyword_scan([], "")  # another lecture is open now
+            return
+        if not result.terms:
+            panel.end_keyword_scan([], f"No terms were found on the {result.slides} slides.")
+            return
+
+        added = panel.end_keyword_scan(result.terms)
+        panel.update_keyword_scan(
+            f"Added {added} terms from {result.slides} slides. Check them before "
+            "transcribing - OCR can misspell a term."
+        )
+        # Kept with the lecture, so they are there when it is opened again.
+        self.project.meta.transcription.keywords = normalize_keywords(panel.keywords_text)
+        try:
+            self.project.save_meta()
+        except ProjectError:
+            log.warning("Could not save the keywords", exc_info=True)
+
+    def _finish_reading_keywords(self) -> None:
+        if self._keywords_thread is not None:
+            self._keywords_thread.quit()
+            self._keywords_thread.wait(15000)
+        self._keywords_thread = None
+        self._keywords_worker = None
+
+    def _stop_reading_keywords(self) -> None:
+        """Stop a slide reading before its lecture goes away."""
+        if self._keywords_thread is not None:
+            self._keywords_cancel.set()
+            self._keywords_thread.quit()
+            self._keywords_thread.wait(15000)
 
     def _cancel_transcription(self) -> None:
         if self._transcribe_worker is not None:
@@ -1278,6 +1375,7 @@ class MainWindow(QMainWindow):
         self.settings.set("window_geometry", [rect.x(), rect.y(), rect.width(), rect.height()])
 
         self._wait_for_export()
+        self._stop_reading_keywords()
         self._flush_edits()
         if self.project is not None:
             try:

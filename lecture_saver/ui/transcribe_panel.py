@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QToolButton,
@@ -42,6 +42,10 @@ from .theme import Role, set_flag, set_role
 __all__ = ["TranscribePanel"]
 
 
+def _terms(keywords: str) -> set[str]:
+    return {term.casefold() for term in keywords.split(", ") if term}
+
+
 class TranscribePanel(QFrame):
     """Model/language pickers, a start button, and live progress."""
 
@@ -49,6 +53,8 @@ class TranscribePanel(QFrame):
     #: Continue an unfinished transcription with these options.
     resumeRequested = Signal(object)  # WhisperOptions
     cancelRequested = Signal()
+    #: Read the slide images and fill the keywords with their terms.
+    keywordsFromSlidesRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,15 +79,30 @@ class TranscribePanel(QFrame):
         for key, label in LANGUAGE_CHOICES:
             self._language_box.addItem(label, key)
 
-        self._keywords_edit = QLineEdit()
-        self._keywords_edit.setMaxLength(KEYWORD_CHAR_LIMIT * 2)
-        self._keywords_edit.setClearButtonEnabled(True)
+        # Several lines, wrapped: terms read off the slides need checking, and
+        # forty of them in a one-line box cannot be seen.
+        self._keywords_edit = QPlainTextEdit()
+        self._keywords_edit.setTabChangesFocus(True)
         self._keywords_edit.setPlaceholderText("e.g. cross validation, Naive Bayes, TLB")
+        # Three lines, plus the theme's padding and the document's own margin.
+        self._keywords_edit.setFixedHeight(self._keywords_edit.fontMetrics().lineSpacing() * 3 + 26)
         self._keywords_edit.setToolTip(
             "Terms, names and acronyms this lecture uses, separated by commas.\n"
             "Whisper is given them as hints, so it spells them the way you\n"
             f"write them here. Optional; up to {KEYWORD_CHAR_LIMIT} characters are used."
         )
+        self._slides_button = QPushButton("From slides")
+        #: Whether the lecture has slide images to read, and why not if not.
+        self._slides_ready = False
+        self._slides_reason = "Detect slides first, then the terms on them can be read."
+        self._scanning = False
+        self._video_ok = True
+        self._keywords_row = QWidget()
+        keywords_row = QHBoxLayout(self._keywords_row)
+        keywords_row.setContentsMargins(0, 0, 0, 0)
+        keywords_row.setSpacing(6)
+        keywords_row.addWidget(self._keywords_edit, 1)
+        keywords_row.addWidget(self._slides_button, 0, Qt.AlignmentFlag.AlignTop)
 
         self._vad_check = QCheckBox("Skip silent parts (recommended)")
         self._vad_check.setChecked(True)
@@ -103,7 +124,7 @@ class TranscribePanel(QFrame):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.addRow("Model:", self._model_box)
         form.addRow("Language:", self._language_box)
-        form.addRow("Keywords:", self._keywords_edit)
+        form.addRow("Keywords:", self._keywords_row)
         form.addRow("", self._vad_check)
 
         self._start_button = QPushButton("Transcribe lecture")
@@ -190,8 +211,10 @@ class TranscribePanel(QFrame):
             lambda: self.resumeRequested.emit(self.options())
         )
         self._cancel_button.clicked.connect(self._on_cancel)
+        self._slides_button.clicked.connect(self.keywordsFromSlidesRequested)
         self._model_box.currentIndexChanged.connect(self._update_estimate)
         self._update_estimate()
+        self._refresh_slides_button()
 
     # -- configuration ------------------------------------------------------
 
@@ -213,14 +236,14 @@ class TranscribePanel(QFrame):
         self._vad_check.setChecked(bool(values.get("vad_filter", True)))
         # Keywords belong to a lecture, so a set without them clears the box
         # rather than carrying the last lecture's terms over.
-        self._keywords_edit.setText(str(values.get("keywords", "") or ""))
+        self._keywords_edit.setPlainText(str(values.get("keywords", "") or ""))
 
     def options(self) -> WhisperOptions:
         return WhisperOptions(
             model_size=str(self._model_box.currentData()),
             language=str(self._language_box.currentData()),
             vad_filter=self._vad_check.isChecked(),
-            keywords=normalize_keywords(self._keywords_edit.text()),
+            keywords=normalize_keywords(self.keywords_text),
         )
 
     def set_already_transcribed(self, count: int) -> None:
@@ -284,8 +307,10 @@ class TranscribePanel(QFrame):
         self._blocked_reason = "" if enabled else reason
         self._start_button.setEnabled(enabled)
         self._resume_button.setEnabled(enabled)
+        self._video_ok = enabled
         for widget in self._option_widgets:
             widget.setEnabled(enabled)
+        self._refresh_slides_button()
         if not enabled and reason:
             self._stage_label.setText(reason)
 
@@ -308,6 +333,7 @@ class TranscribePanel(QFrame):
         self._detail_label.setText("")
         for widget in self._option_widgets:
             widget.setEnabled(False)
+        self._refresh_slides_button()
 
     def end_run(self, final_message: str) -> None:
         self._running = False
@@ -319,6 +345,7 @@ class TranscribePanel(QFrame):
         self._stage_label.setText(final_message)
         for widget in self._option_widgets:
             widget.setEnabled(True)
+        self._refresh_slides_button()
 
     def update_progress(self, stage: str, fraction: float, message: str) -> None:
         self._stage_label.setText(stage)
@@ -339,6 +366,53 @@ class TranscribePanel(QFrame):
     @property
     def _option_widgets(self) -> tuple[QWidget, ...]:
         return (self._model_box, self._language_box, self._keywords_edit, self._vad_check)
+
+    # -- keywords from the slides -------------------------------------------
+
+    def set_slide_keywords_available(self, available: bool, reason: str = "") -> None:
+        """Whether there are slide images to read terms off, and why not."""
+        self._slides_ready = available
+        self._slides_reason = reason
+        self._refresh_slides_button()
+
+    def begin_keyword_scan(self) -> None:
+        self._scanning = True
+        self._slides_button.setText("Reading...")
+        self._refresh_slides_button()
+
+    def update_keyword_scan(self, message: str) -> None:
+        self._detail_label.setText(message)
+
+    def end_keyword_scan(self, terms: list[str], message: str = "") -> int:
+        """Add ``terms`` after whatever was typed; how many were new.
+
+        Typed terms come first, so they are the last to go if the hint runs
+        out of room.
+        """
+        self._scanning = False
+        self._slides_button.setText("From slides")
+        typed = normalize_keywords(self.keywords_text)
+        merged = normalize_keywords(", ".join([typed, *terms]))
+        self._keywords_edit.setPlainText(merged)
+        self._detail_label.setText(message)
+        self._refresh_slides_button()
+        return len(_terms(merged) - _terms(typed))
+
+    @property
+    def keywords_text(self) -> str:
+        return self._keywords_edit.toPlainText()
+
+    def _refresh_slides_button(self) -> None:
+        usable = self._slides_ready and self._video_ok and not self._running
+        self._slides_button.setEnabled(usable and not self._scanning)
+        if self._slides_ready:
+            self._slides_button.setToolTip(
+                "Read the text on this lecture's slides and add the terms it uses\n"
+                "to the keywords. Done on this computer with Windows' own OCR.\n"
+                "Check the list before transcribing: OCR can misspell a term."
+            )
+        else:
+            self._slides_button.setToolTip(self._slides_reason)
 
     # -- internals ----------------------------------------------------------
 

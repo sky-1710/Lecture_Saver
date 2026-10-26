@@ -27,6 +27,19 @@ faster-whisper>=1.1.0
 # faster-whisper.
 openvino-genai>=2026.4,<2027
 
+# --- Reading slide text (keywords "From slides") ------------------------------
+# Python bindings for the OCR engine built into Windows (Windows.Media.Ocr):
+# part of the operating system, local and offline, no model to download. On
+# other systems the button is shown as unavailable.
+winrt-runtime>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Media.Ocr>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=3.2,<4; sys_platform == "win32"
+winrt-Windows.Globalization>=3.2,<4; sys_platform == "win32"
+# Pillow (used to read slide images) already comes with reportlab below.
+
 # --- Slide detection --------------------------------------------------------
 # All frame comparison (perceptual hashing, per-cell SSIM, grid change maps) is
 # plain NumPy. OpenCV is deliberately not used: FFmpeg already does the

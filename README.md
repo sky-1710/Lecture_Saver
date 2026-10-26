@@ -184,6 +184,18 @@ transcribed — with faster-whisper on the CPU — and the app says so.
 every 30-second window and spells them that way: on the test lecture this turned
 "크루스 밸리데이션" into "크로스 밸리데이션". They are kept per lecture.
 
+**Keywords from the slides.** After *Detect slides*, press **From slides** next
+to the Keywords box: the text on every slide is read with the OCR built into
+Windows (local, offline, nothing to download — about 0.2 s a slide), and the
+terms it uses are added after anything you typed — headings and phrases shown on
+several slides first (`ROC Curve, Cross Validation, False positive rate, AUC,
+leave-one-out cross validation, …`), headers and footers on every slide left out.
+On a Korean lecture about English slides this fixed "크루스 밸리데이션" and
+"배리데이션 셋", and the transcript kept phrases it had dropped without the
+hints; the terms then come out spelled as on the slides ("Validation set").
+**Check the list before transcribing:** OCR can misread a term, Korean slide text
+especially, and a misspelled hint is copied.
+
 The app shows an estimate before you start, and you can cancel at any time —
 segments already transcribed are kept.
 
@@ -214,7 +226,8 @@ to one language for the whole recording.
 - Local transcription with **faster-whisper** (CTranslate2), CPU int8
 - **Turbo on the Intel GPU** via OpenVINO: VAD-cut 30-second windows, about
   2.7x faster than `medium`, falling back to the CPU and then to faster-whisper
-- Keyword hints (course terms) given to Whisper before every window
+- Keyword hints (course terms) given to Whisper before every window, typed or
+  read off the slide images with Windows' built-in OCR
 - Korean, English, Japanese, Chinese, or auto-detect
 - Segment-level timestamps
 - Transcript list with click-to-seek and follow-playback highlighting
@@ -531,7 +544,7 @@ fresh scan.
 ```powershell
 pip install -r requirements-dev.txt
 
-pytest                # 931 tests, no lecture video or model needed
+pytest                # 967 tests, no lecture video or model needed
 pytest -m scenario    # + renders real lecture clips and detects slides in them
 pytest -m model       # + real transcription (downloads the tiny model; runs
                       #   Turbo on OpenVINO too if its model is downloaded)
@@ -567,6 +580,8 @@ testable without a GUI or a lecture recording.
   `openvino-telemetry` package; only its model-conversion tool (`ovc`) uses it,
   and the app never runs that. A Turbo transcription, model loading included,
   was watched for network connections and made none.
+- Slide text for keywords is read by Windows' own OCR (`Windows.Media.Ocr`),
+  which runs on this machine — no cloud vision service.
 - No telemetry, analytics, crash reporting or remote logging
 - No local web server and no listening socket
 - Project data stays in your project folders; settings stay in

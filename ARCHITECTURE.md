@@ -79,6 +79,7 @@ Fully local lecture video → transcript → slide-linked notes.
           slides.py              slide / appearance models + detection options
           alignment.py           which speech belongs to which slide (§10)
           sentences.py           where a line may be cut so sentences survive
+          keywords.py            slide text -> course terms for Whisper's hints
           project.py             project dir layout, create/load/save
         media/
           errors.py
@@ -90,6 +91,7 @@ Fully local lecture video → transcript → slide-linked notes.
           segmentation.py        Whisper words -> lines that end at sentences
           pipeline.py            extract -> transcribe -> persist, resumable
         slides/
+          slide_text.py          slide image -> text lines (Windows OCR)
           descriptors.py         Pass A: decode once, cache frame descriptors
           ink_analysis.py        shape of a change: thickness, replacement
           detector.py            Pass B: pure scoring + state machine
@@ -251,6 +253,20 @@ go to Whisper as `hotwords` - the prompt before *every* window, unlike
 `initial_prompt`, which only reaches the first when previous text is not carried
 over. OpenVINO refuses a prompt over ~220 tokens, so the terms are halved until
 they fit.
+
+**Keywords from the slides.** `slides/slide_text.py` reads each distinct slide
+image with Windows' built-in OCR (`Windows.Media.Ocr` through `winrt`; ~0.2 s a
+slide, on the background thread that made the engine) and returns lines with
+their height. `core/keywords.py` - pure, tested on made-up OCR text - turns
+those into terms, RAKE-style: phrases cut at stop words and punctuation, scored
+by the slides they appear on, doubled in headings (lines ≥1.5x the median
+height), multi-word terms preferred, generic words ("data", "time") only inside a
+phrase, text on ≥75 % of slides dropped as header/footer. Most of the module is
+undoing OCR: a Korean recogniser reads Latin text with its own confusions
+("SpIitting", "tO", "PIOts", P(X|Y) as "XIY"), pictures as Hangul, and text
+under a pop-up in part ("age table"); Hangul words one syllable off a commoner
+word (샴표/상표) are taken as misreadings. The terms go into the Keywords box,
+after what was typed, for the user to check.
 
 **Language:** `auto` (Whisper's own detection), or forced `ko`/`en`. For mixed
 Korean/English lectures, forcing `ko` gives markedly better results than `auto`,

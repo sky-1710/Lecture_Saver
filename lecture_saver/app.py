@@ -159,6 +159,18 @@ def selftest() -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"OpenVINO         : unavailable - {exc} (Turbo will use the CPU engine)")
 
+    # Optional: without it "From slides" is shown as unavailable.
+    from .slides.slide_text import unavailable_reason
+
+    reason = unavailable_reason()
+    if reason:
+        print(f"Slide text (OCR) : unavailable - {reason}")
+    else:
+        from winrt.windows.media.ocr import OcrEngine
+
+        tags = ", ".join(lang.language_tag for lang in OcrEngine.available_recognizer_languages)
+        print(f"Slide text (OCR) : Windows OCR ({tags})")
+
     free_gb = shutil.disk_usage(Path.home()).free / 1e9
     print(f"Free disk        : {free_gb:.1f} GB")
     if free_gb < 2:
