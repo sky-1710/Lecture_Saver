@@ -115,3 +115,21 @@ class TranslationEngine(ABC):
         if schema is not None:
             raise TranslationError(f"{self.label} cannot return structured answers.")
         return self.translate(prompt, cancel=cancel)
+
+    #: Whether :meth:`converse` can carry a conversation on in one session.
+    supports_sessions: bool = False
+
+    def converse(
+        self, prompt: str, *, session: str | None = None, cancel: threading.Event
+    ) -> tuple[str, str | None]:
+        """One turn of a conversation: the answer, and the session it is in.
+
+        Ask AI uses this. With ``session`` the turn continues that session,
+        which already holds everything sent in it before, so ``prompt`` need
+        only carry what is new. An engine without sessions answers each turn
+        on its own and returns no session; its prompts must carry everything.
+        """
+        return self.ask(prompt, cancel=cancel), None
+
+    def forget_session(self, session: str) -> None:  # noqa: B027 - nothing kept by default
+        """Delete whatever this computer keeps of a conversation that ended."""

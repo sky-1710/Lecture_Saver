@@ -294,18 +294,28 @@ class TranslationWorker(QObject):
 class AskWorker(QObject):
     """Asks the assistant one question about the lecture.
 
-    The prompt is built on the UI thread from a snapshot of the transcript;
+    The prompts are built on the UI thread from a snapshot of the transcript;
     this thread only waits for the answer, which can take a minute.
     """
 
-    answered = Signal(str)
+    #: An :class:`lecture_saver.ask.Reply`.
+    answered = Signal(object)
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, prompt: str, engine: object) -> None:
+    def __init__(
+        self,
+        engine: object,
+        fresh: object,
+        *,
+        follow_up: object | None = None,
+        session: object | None = None,
+    ) -> None:
         super().__init__()
-        self._prompt = prompt
         self._engine = engine
+        self._fresh = fresh
+        self._follow_up = follow_up
+        self._session = session
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -313,11 +323,18 @@ class AskWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        from ..ask import ask_question
         from ..ask.answer import failure_message
         from ..translate.engine import TranslationCancelled, TranslationError
 
         try:
-            answer = self._engine.ask(self._prompt, cancel=self._cancel)  # type: ignore[attr-defined]
+            reply = ask_question(
+                self._engine,  # type: ignore[arg-type]
+                self._fresh,  # type: ignore[arg-type]
+                follow_up=self._follow_up,  # type: ignore[arg-type]
+                session=self._session,  # type: ignore[arg-type]
+                cancel=self._cancel,
+            )
         except TranslationCancelled:
             self.cancelled.emit()
             return
@@ -327,9 +344,14 @@ class AskWorker(QObject):
             self.failed.emit(failure_message(exc))
             return
         if self._cancel.is_set():
+            # Stopped as the answer came: a session it started is not kept.
+            if reply.session is not None and reply.session.id != getattr(self._session, "id", None):
+                from ..ask import forget_session
+
+                forget_session(reply.session)
             self.cancelled.emit()
             return
-        self.answered.emit(str(answer).strip())
+        self.answered.emit(reply)
 
 
 class StudyPackWorker(QObject):

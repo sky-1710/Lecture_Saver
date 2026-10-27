@@ -103,7 +103,8 @@ Fully local lecture video → transcript → slide-linked notes.
           prompts.py             the two requests and their JSON schemas
           generator.py           ask, validate, shuffle answers, hand back
         ask/                     Ask AI: questions about the lecture (sends text too)
-          prompt.py              which transcript goes with a question, and how
+          __init__.py            a question as a turn of the lecture's session
+          prompt.py              which transcript goes, once per session; follow-ups
           answer.py              cited times/slides -> links; failure wording
         translate/               the ONE part that can send text off-machine
           engine.py              what an engine is; the errors it may raise
@@ -572,6 +573,19 @@ one matters more than it looks: the user's `config.toml` carries a default
 model their installed Codex may be too old to accept, and MCP servers that
 are started for every run and fail if they need authorising. Neither belongs
 in a translation. Their sign-in is not in that file and still applies.
+
+Ask AI is the one use that keeps a session. A lecture's conversation is one
+Codex session: the first question runs with `--json` instead of
+`--ephemeral` (the `thread.started` event gives its id, kept in `chat.json`),
+and each follow-up is `codex exec resume <id>`, so the model has its own
+earlier answers in view - pasting the history into fresh runs made "그럼 이걸
+간단히 해줘" answer the slide on screen instead of the last answer. The
+transcript goes in pieces (a slide, or a minute without slides) with a
+fingerprint each, so a follow-up carries only pieces the session lacks or the
+user corrected since. A session that cannot be resumed is replaced by a fresh
+run carrying everything plus the recent turns. *New chat* deletes the session
+file from `CODEX_HOME/sessions`; so does a first turn that failed or was
+stopped.
 
 ### Batching, and why a failure is cheap
 

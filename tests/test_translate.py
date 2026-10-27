@@ -379,6 +379,78 @@ class TestCodexEngine:
         )
         assert command[command.index("-m") + 1] == AFFORDABLE_MODELS[0]
 
+    def test_a_question_starts_a_session_that_is_kept(self, tmp_path):
+        from lecture_saver.translate.codex_cli import CodexEngine
+
+        command = CodexEngine()._command(tmp_path / "codex.exe", tmp_path / "answer.md", keep=True)
+        assert "--json" in command and "--ephemeral" not in command
+        assert "read-only" in command and command[-1] == "-"
+
+    def test_a_follow_up_resumes_the_session(self, tmp_path):
+        from lecture_saver.translate.codex_cli import CodexEngine
+
+        command = CodexEngine(model="gpt-5.1")._command(
+            tmp_path / "codex.exe", tmp_path / "answer.md", resume="0199-abcd-ef01"
+        )
+        assert command[1:3] == ["exec", "resume"]
+        assert command[-2:] == ["0199-abcd-ef01", "-"]
+        assert command[command.index("-m") + 1] == "gpt-5.1"
+        assert "--ignore-user-config" in command and "--sandbox" not in command
+
+    def test_the_session_id_is_read_from_the_json_events(self):
+        from lecture_saver.translate.codex_cli import _thread_id
+
+        assert _thread_id('noise\n{"type":"thread.started","thread_id":"0199-ab"}\n') == "0199-ab"
+        assert _thread_id("no events") is None
+
+    def test_forgetting_a_session_deletes_only_its_file(self, tmp_path, monkeypatch):
+        from lecture_saver.translate.codex_cli import forget_codex_session
+
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        day = tmp_path / "sessions" / "2026" / "10" / "27"
+        day.mkdir(parents=True)
+        mine = day / "rollout-2026-10-27T23-22-42-0199abcd-0000-1111-2222-333344445555.jsonl"
+        other = day / "rollout-2026-10-27T23-22-42-0199ffff-0000-1111-2222-333344445555.jsonl"
+        mine.write_text("{}", encoding="utf-8")
+        other.write_text("{}", encoding="utf-8")
+
+        assert forget_codex_session("0199abcd-0000-1111-2222-333344445555") == 1
+        assert not mine.exists() and other.exists()
+        assert forget_codex_session("../*") == 0
+
+    def test_a_conversation_runs_in_one_session(self, tmp_path, monkeypatch):
+        """Through a stand-in for Codex: the id the first turn reports is the
+        session the next turn resumes."""
+        from pathlib import Path
+
+        from lecture_saver.translate import codex_cli
+        from lecture_saver.translate.codex_cli import CodexEngine
+
+        commands: list[list[str]] = []
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, cmd, **kwargs):
+                commands.append(cmd)
+                answer = Path(cmd[cmd.index("--output-last-message") + 1])
+                answer.write_text(f"answer {len(commands)}", encoding="utf-8")
+
+            def communicate(self, input=None, timeout=None):
+                return '{"type":"thread.started","thread_id":"0199-abcd-ef01"}\n', ""
+
+        monkeypatch.setattr(codex_cli.subprocess, "Popen", FakeProcess)
+        (tmp_path / "codex.exe").write_bytes(b"")
+        engine = CodexEngine(binary=tmp_path / "codex.exe", home=tmp_path)
+        cancel = threading.Event()
+
+        assert engine.converse("first", cancel=cancel) == ("answer 1", "0199-abcd-ef01")
+        assert engine.converse("next", session="0199-abcd-ef01", cancel=cancel) == (
+            "answer 2", "0199-abcd-ef01",
+        )
+        assert "resume" not in commands[0]
+        assert commands[1][1:3] == ["exec", "resume"]
+
     def test_the_answer_is_read_from_the_file_not_the_chatter(self, tmp_path):
         from lecture_saver.translate.codex_cli import CodexEngine
 

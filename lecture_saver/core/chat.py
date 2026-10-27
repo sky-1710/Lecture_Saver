@@ -8,6 +8,11 @@ so the conversation still reads sensibly after the transcript is edited.
 The quoted lines are copies of the text as it was when asked. They are part of
 the question, not of the transcript: the transcript stays the single source of
 truth (§14) and nothing here is ever written back to it.
+
+The assistant keeps its own copy of the conversation - a Codex session, see
+:meth:`lecture_saver.translate.engine.TranslationEngine.converse` - so a
+follow-up is a turn of that same conversation rather than a new one. Which
+session, and what has been sent in it, is :class:`ChatSession`.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ __all__ = [
     "ROLE_USER",
     "ChatLog",
     "ChatMessage",
+    "ChatSession",
     "Quote",
 ]
 
@@ -110,10 +116,45 @@ class ChatMessage:
 
 
 @dataclass
+class ChatSession:
+    """The assistant's side of the conversation: one session it keeps.
+
+    ``sent`` is what the session holds already - each piece of transcript
+    (a slide, or a stretch of time) by key, with a fingerprint of its text -
+    so a follow-up sends only what is new, and a line corrected since is
+    sent again.
+    """
+
+    #: The engine's id for the session.
+    id: str
+    #: Which engine keeps it (``TranslationEngine.key``).
+    engine: str
+    sent: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "engine": self.engine, "sent": dict(self.sent)}
+
+    @classmethod
+    def from_dict(cls, data: object) -> ChatSession | None:
+        if not isinstance(data, dict) or not data.get("id"):
+            return None
+        sent = data.get("sent")
+        return cls(
+            id=str(data["id"]),
+            engine=str(data.get("engine") or ""),
+            sent=(
+                {str(k): str(v) for k, v in sent.items()} if isinstance(sent, dict) else {}
+            ),
+        )
+
+
+@dataclass
 class ChatLog:
     """The lecture's conversation, oldest message first."""
 
     messages: list[ChatMessage] = field(default_factory=list)
+    #: The session the conversation continues in, once there is one.
+    session: ChatSession | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -125,12 +166,16 @@ class ChatLog:
 
     def clear(self) -> None:
         self.messages = []
+        self.session = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "schema_version": CHAT_SCHEMA_VERSION,
             "messages": [m.to_dict() for m in self.messages],
         }
+        if self.session is not None:
+            data["session"] = self.session.to_dict()
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> ChatLog:
@@ -139,5 +184,6 @@ class ChatLog:
         return cls(
             messages=[
                 ChatMessage.from_dict(m) for m in data.get("messages") or [] if isinstance(m, dict)
-            ]
+            ],
+            session=ChatSession.from_dict(data.get("session")),
         )

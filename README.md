@@ -367,14 +367,20 @@ to one language for the whole recording.
 - Each question carries where you are: the playback position, the slide shown
   and the lines pointed at. *This part* sends that slide and its neighbours
   (without slides, the few minutes around that moment); *Whole lecture* sends
-  every line. Earlier turns go along, so follow-ups work. Corrections you made
-  are what is sent; blanked lines are not
+  every line. Corrections you made are what is sent; blanked lines are not
+- One lecture's chat is one conversation for the assistant too: it runs in a
+  single Codex session, so a follow-up ("그럼 이걸 간단히 해줘") is answered
+  with the earlier answers in view. A follow-up sends only what the session
+  has not had yet — the question, slides not sent before, a line you
+  corrected since — not the transcript again. If the session cannot be
+  continued, a new one starts with the recent turns
 - Answers are in the language you ask in, and cite the lecture as
   `[00:12:34]` and *Slide 8*; both are links that seek the video and show the
   slide and line
 - A question that fails (usage limit, no sign-in, Stop) is put back in the box
   with its lines rather than lost
-- Saved per lecture in `chat.json`; *New chat* forgets it. Set `"ask_model"` in
+- Saved per lecture in `chat.json`; *New chat* forgets it, and deletes the
+  Codex session too. Set `"ask_model"` in
   `%APPDATA%\LectureSaver\settings.json` to use another model for questions
   than for translation
 
@@ -648,15 +654,21 @@ switching it on changes this, and only this:
 - All three run through the **Codex CLI**, signed in with your own ChatGPT
   account. Lecture Saver stores no API key and never sees your sign-in — it
   runs the program you already have and reads back what it prints.
-- Codex is run with `--ephemeral`, so the lecture is not written into a
-  session log on disk, and with `--sandbox read-only`, so it cannot touch
-  your files.
+- Codex is run with `--sandbox read-only`, so it cannot touch your files.
+  Translation and the study pack also run with `--ephemeral`, so the lecture
+  is not written into a session log on disk. *Ask AI* is the exception: a
+  conversation is a Codex session, which Codex keeps in
+  `%USERPROFILE%\.codex\sessions` on this computer (the text sent in it, and
+  the answers) so that follow-ups can continue it. *New chat* deletes that
+  file; a session whose first question failed or was stopped is deleted at
+  once.
 - Turn it off again and the rest of the application keeps working with no
   internet connection.
 
 *Ask AI* sends only when you ask: your question, the lines you pointed at,
 the transcript of the part you asked about (or of the whole lecture, if you
-chose that) and the conversation so far.
+chose that) and, when a conversation has to be started again, its recent
+turns. Within one conversation each piece of transcript goes once.
 
 The study pack's preview and quiz are made from the same transcript text,
 in two requests of the whole lecture — an overview and a quiz both need to

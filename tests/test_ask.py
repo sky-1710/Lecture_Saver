@@ -15,18 +15,26 @@ import time
 
 import pytest
 
-from lecture_saver.ask import ask_engine_from_settings
+from lecture_saver.ask import ask_engine_from_settings, ask_question
 from lecture_saver.ask.answer import failure_message, prepare_answer
 from lecture_saver.ask.prompt import (
     DEFAULT_QUESTION,
     SCOPE_LECTURE,
     SCOPE_NEARBY,
     Focus,
+    build_follow_up,
     build_prompt,
     question_text,
     transcript_excerpt,
 )
-from lecture_saver.core.chat import ROLE_ASSISTANT, ROLE_USER, ChatLog, ChatMessage, Quote
+from lecture_saver.core.chat import (
+    ROLE_ASSISTANT,
+    ROLE_USER,
+    ChatLog,
+    ChatMessage,
+    ChatSession,
+    Quote,
+)
 from lecture_saver.core.models import TranscriptSegment, VideoInfo
 from lecture_saver.core.project import Project
 from lecture_saver.core.slides import Slide, SlideAppearance, SlideSet
@@ -99,6 +107,25 @@ class FakeEngine(TranslationEngine):
         if self.error is not None:
             raise self.error
         return self.answer
+
+
+class SessionEngine(FakeEngine):
+    """Keeps a conversation in a session, as Codex does: the first turn
+    starts one, and a later turn names it."""
+
+    supports_sessions = True
+
+    def __init__(self, *args, refuse_resume=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.turns: list[tuple[str, str | None]] = []
+        self.refuse_resume = refuse_resume
+
+    def converse(self, prompt, *, session=None, cancel):
+        self.turns.append((prompt, session))
+        if session is not None and self.refuse_resume is not None:
+            raise self.refuse_resume
+        answer = self.translate(prompt, cancel=cancel)
+        return answer, session or f"0199-session-{len(self.turns)}"
 
 
 def pump_until(predicate, timeout: float = 10.0) -> bool:
@@ -177,7 +204,7 @@ class TestWhichTranscriptGoes:
         assert "line of slide 4" in text
         assert "line of slide 5" in text
         assert "line of slide 2" not in text and "line of slide 6" not in text
-        assert "Slide 4 (00:00:30–00:00:40)  ← 학생이 보고 있는 슬라이드" in text
+        assert "### Slide 4 (00:00:30–00:00:40)\n[00:00:31] line of slide 4" in text
 
     def test_a_quoted_line_decides_the_slide_over_the_one_shown(self, project):
         document = build_document(project)
@@ -227,7 +254,7 @@ class TestWhichTranscriptGoes:
 
     def test_only_words_are_sent(self, project):
         document = build_document(project)
-        prompt = build_prompt(document, "질문", focus=Focus(slide=1), scope=SCOPE_LECTURE)
+        prompt = build_prompt(document, "질문", focus=Focus(slide=1), scope=SCOPE_LECTURE).prompt
         assert ".jpg" not in prompt
         assert str(project.root) not in prompt
         assert "lecture.mp4" not in prompt
@@ -237,7 +264,7 @@ class TestThePrompt:
     def test_it_carries_the_question_the_quotes_and_where_the_user_is(self, project):
         document = build_document(project)
         focus = Focus(position=33.0, slide=4, quotes=(Quote("segment_004", 31.0, "slide 4"),))
-        prompt = build_prompt(document, "", focus=focus, scope=SCOPE_NEARBY)
+        prompt = build_prompt(document, "", focus=focus, scope=SCOPE_NEARBY).prompt
 
         assert prompt.rstrip().endswith(DEFAULT_QUESTION)
         assert "## 학생이 짚은 전사 부분\n[00:00:31] slide 4" in prompt
@@ -247,7 +274,7 @@ class TestThePrompt:
     def test_the_rules_and_transcript_come_before_what_changes(self, project):
         """The repeated part first, so the service can reuse it."""
         document = build_document(project)
-        prompt = build_prompt(document, "질문", focus=Focus(), scope=SCOPE_LECTURE)
+        prompt = build_prompt(document, "질문", focus=Focus(), scope=SCOPE_LECTURE).prompt
         assert prompt.index("## 강의 전사") < prompt.index("## 질문")
 
     def test_earlier_turns_go_along_for_a_follow_up(self, project):
@@ -259,7 +286,7 @@ class TestThePrompt:
         ]
         prompt = build_prompt(
             document, "그럼 너무 크면요?", focus=Focus(), scope=SCOPE_NEARBY, history=history
-        )
+        ).prompt
         assert "학생: > [00:00:11] line of slide 2\n러닝레이트가 뭐예요?" in prompt
         assert "조교: 학습률입니다." in prompt
 
@@ -267,10 +294,157 @@ class TestThePrompt:
         document = build_document(project)
         history = [ChatMessage(role=ROLE_USER, text=f"old {i} " + "x" * 3000) for i in range(10)]
         history.append(ChatMessage(role=ROLE_ASSISTANT, text="the latest answer"))
-        prompt = build_prompt(document, "q", focus=Focus(), scope=SCOPE_NEARBY, history=history)
+        prompt = build_prompt(
+            document, "q", focus=Focus(), scope=SCOPE_NEARBY, history=history
+        ).prompt
         assert "the latest answer" in prompt
         assert "old 9 " in prompt
         assert "old 0 " not in prompt
+
+
+class TestFollowUps:
+    """A session holds what it was sent: a follow-up carries only what is new."""
+
+    def test_the_first_question_records_the_slides_it_sent(self, project):
+        first = build_prompt(build_document(project), "q", focus=Focus(slide=4), scope=SCOPE_NEARBY)
+        assert sorted(first.sent) == ["slide:3@20.0", "slide:4@30.0", "slide:5@40.0"]
+
+    def test_a_follow_up_does_not_send_the_transcript_again(self, project):
+        document = build_document(project)
+        first = build_prompt(document, "q", focus=Focus(slide=4), scope=SCOPE_NEARBY)
+        history = [
+            ChatMessage(role=ROLE_USER, text="q", slide=4),
+            ChatMessage(role=ROLE_ASSISTANT, text="a"),
+        ]
+        follow = build_follow_up(
+            document, "그럼 이걸 간단히 해줘", focus=Focus(slide=4), scope=SCOPE_NEARBY,
+            history=history, sent=first.sent,
+        )
+        assert follow.prompt == "## 질문\n그럼 이걸 간단히 해줘\n"
+        assert follow.sent == first.sent
+
+    def test_moving_on_sends_only_the_slides_not_sent_yet(self, project):
+        document = build_document(project)
+        first = build_prompt(document, "q", focus=Focus(slide=2), scope=SCOPE_NEARBY)
+        follow = build_follow_up(
+            document, "여기는요?", focus=Focus(position=33.0, slide=4), scope=SCOPE_NEARBY,
+            history=[ChatMessage(role=ROLE_USER, text="q", slide=2)], sent=first.sent,
+        )
+        assert "line of slide 4" in follow.prompt and "line of slide 5" in follow.prompt
+        assert "line of slide 3" not in follow.prompt  # went with the first question
+        assert "## 학생이 이제 보고 있는 곳\n영상 위치 [00:00:33] · Slide 4" in follow.prompt
+        assert len(follow.sent) == 5
+
+    def test_a_line_corrected_since_is_sent_again(self, project):
+        first = build_prompt(build_document(project), "q", focus=Focus(slide=2), scope=SCOPE_NEARBY)
+        project.transcript.edit_text("segment_002", "corrected learning rate")
+        follow = build_follow_up(
+            build_document(project), "q2", focus=Focus(slide=2), scope=SCOPE_NEARBY,
+            history=[ChatMessage(role=ROLE_USER, text="q", slide=2)], sent=first.sent,
+        )
+        assert "corrected learning rate" in follow.prompt
+        assert "전사를 고쳤습니다" in follow.prompt
+        assert "line of slide 1" not in follow.prompt  # unchanged, so not again
+        assert follow.sent != first.sent
+
+    def test_the_whole_lecture_asked_later_sends_the_rest(self, project):
+        document = build_document(project)
+        first = build_prompt(document, "q", focus=Focus(slide=2), scope=SCOPE_NEARBY)
+        follow = build_follow_up(
+            document, "전체 요약", focus=Focus(slide=2), scope=SCOPE_LECTURE,
+            history=[ChatMessage(role=ROLE_USER, text="q", slide=2)], sent=first.sent,
+        )
+        for number in (4, 5, 6):
+            assert f"line of slide {number}" in follow.prompt
+        for number in (1, 2, 3):
+            assert f"line of slide {number}" not in follow.prompt
+        assert len(follow.sent) == 6
+
+    def test_asking_again_from_the_same_place_says_so(self, project):
+        """"이걸" then means the last answer, not the slide on screen."""
+        history = [
+            ChatMessage(role=ROLE_USER, text="q", slide=4),
+            ChatMessage(role=ROLE_ASSISTANT, text="a"),
+        ]
+        prompt = build_prompt(
+            build_document(project), "그럼 이걸 간단히 해줘", focus=Focus(slide=4),
+            scope=SCOPE_NEARBY, history=history,
+        ).prompt
+        assert "## 학생이 지금 보고 있는 곳 (앞 질문 때와 같음)" in prompt
+        assert "직전 답" in prompt
+
+    def test_without_slides_the_transcript_goes_a_minute_at_a_time(self, tmp_path):
+        project = _lecture(tmp_path, slides=False, count=60)
+        document = build_document(project)
+        first = build_prompt(document, "q", focus=Focus(position=400.0), scope=SCOPE_NEARBY)
+        assert set(first.sent) == {f"time:{minute}" for minute in range(2, 9)}
+        follow = build_follow_up(
+            document, "q2", focus=Focus(position=430.0), scope=SCOPE_NEARBY,
+            history=[ChatMessage(role=ROLE_USER, text="q", position=400.0)], sent=first.sent,
+        )
+        assert follow.prompt == "## 질문\nq2\n"
+
+
+class TestOneConversation:
+    def _requests(self, project):
+        document = build_document(project)
+        fresh = build_prompt(document, "q", focus=Focus(slide=4), scope=SCOPE_NEARBY)
+        follow = build_follow_up(
+            document, "q", focus=Focus(slide=4), scope=SCOPE_NEARBY, history=[], sent=fresh.sent
+        )
+        return fresh, follow
+
+    def test_the_first_question_starts_a_session(self, project):
+        engine = SessionEngine()
+        fresh, _ = self._requests(project)
+        reply = ask_question(engine, fresh, cancel=threading.Event())
+        assert reply.session == ChatSession("0199-session-1", "fake", fresh.sent)
+        assert engine.turns == [(fresh.prompt, None)]
+
+    def test_a_follow_up_continues_it_with_only_what_is_new(self, project):
+        engine = SessionEngine()
+        fresh, follow = self._requests(project)
+        session = ChatSession("0199-abc", "fake", fresh.sent)
+        reply = ask_question(
+            engine, fresh, follow_up=follow, session=session, cancel=threading.Event()
+        )
+        assert engine.turns == [(follow.prompt, "0199-abc")]
+        assert reply.session is not None and reply.session.id == "0199-abc"
+        assert reply.dropped is None
+
+    def test_a_session_that_cannot_go_on_is_started_afresh(self, project):
+        engine = SessionEngine(refuse_resume=TranslationError("no such session"))
+        fresh, follow = self._requests(project)
+        old = ChatSession("0199-gone", "fake", fresh.sent)
+        reply = ask_question(engine, fresh, follow_up=follow, session=old, cancel=threading.Event())
+        assert [session for _, session in engine.turns] == ["0199-gone", None]
+        assert engine.turns[1][0] == fresh.prompt
+        assert reply.session is not None and reply.session.id != "0199-gone"
+        assert reply.dropped == old
+
+    def test_a_usage_limit_is_not_tried_twice(self, project):
+        engine = SessionEngine(refuse_resume=EngineRateLimited("limit"))
+        fresh, follow = self._requests(project)
+        with pytest.raises(EngineRateLimited):
+            ask_question(
+                engine, fresh, follow_up=follow, session=ChatSession("0199-x", "fake"),
+                cancel=threading.Event(),
+            )
+        assert len(engine.turns) == 1
+
+    def test_an_engine_without_sessions_gets_everything_every_time(self, project):
+        engine = FakeEngine()
+        fresh, _ = self._requests(project)
+        reply = ask_question(engine, fresh, cancel=threading.Event())
+        assert reply.session is None
+        assert engine.prompts == [fresh.prompt]
+
+    def test_the_session_is_kept_with_the_conversation(self):
+        log = ChatLog(session=ChatSession("0199-abc", "codex", {"slide:1@0.0": "abc123"}))
+        again = ChatLog.from_dict(json.loads(json.dumps(log.to_dict())))
+        assert again.session == log.session
+        log.clear()
+        assert log.session is None
 
 
 # -- reading the answer ---------------------------------------------------------------
@@ -456,6 +630,59 @@ class TestAskPanel:
         text = panel._view.toPlainText()
         assert "transcript text" in text
         assert "never sent" in text and "slide images" in text
+
+
+class TestAskPanelConversation:
+    @pytest.fixture
+    def engine(self, panel):
+        panel.engine = SessionEngine()
+        return panel.engine
+
+    def test_a_follow_up_is_the_same_conversation(self, panel, project, engine):
+        panel._input.setPlainText("이게 무슨 말이야?")
+        panel.ask()
+        assert pump_until(lambda: not panel.is_busy)
+        panel._input.setPlainText("그럼 이걸 간단히 해줘")
+        panel.ask()
+        assert "same conversation" in panel._status.text()
+        assert pump_until(lambda: not panel.is_busy)
+
+        (first, started), (second, continued) = engine.turns
+        assert started is None and continued == "0199-session-1"
+        assert "## 강의 전사" in first
+        assert second == "## 질문\n그럼 이걸 간단히 해줘\n"
+        saved = json.loads(project.chat_file.read_text(encoding="utf-8"))
+        assert saved["session"]["id"] == "0199-session-1"
+        assert len(saved["messages"]) == 4
+
+    def test_the_conversation_carries_on_after_reopening(self, panel, project, engine):
+        project.chat.add(ChatMessage(role=ROLE_USER, text="q", position=33.0, slide=4))
+        project.chat.add(ChatMessage(role=ROLE_ASSISTANT, text="a"))
+        sent = build_prompt(
+            build_document(project), "q", focus=Focus(slide=4), scope=SCOPE_NEARBY
+        ).sent
+        project.chat.session = ChatSession("0199-kept", "fake", sent)
+        project.save_chat()
+
+        panel.bind(None)
+        panel.bind(Project.open(project.root))
+        panel._input.setPlainText("이어서")
+        panel.ask()
+        assert pump_until(lambda: not panel.is_busy)
+        assert engine.turns == [("## 질문\n이어서\n", "0199-kept")]
+
+    def test_new_chat_makes_the_assistant_forget_too(self, panel, project, monkeypatch):
+        import lecture_saver.translate.codex_cli as codex_cli
+
+        forgotten: list[str] = []
+        monkeypatch.setattr(codex_cli, "forget_codex_session", forgotten.append)
+        project.chat.add(ChatMessage(role=ROLE_USER, text="q"))
+        project.chat.session = ChatSession("0199-abc", "codex")
+        project.save_chat()
+
+        panel.clear_conversation(confirm=False)
+        assert forgotten == ["0199-abc"]
+        assert Project.open(project.root).chat.session is None
 
 
 def test_the_agreement_covers_questions_too():

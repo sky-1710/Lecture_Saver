@@ -8,7 +8,9 @@ asking.
 
 Answers cite the lecture by time and slide; those citations are links that
 seek the video or show the slide. The conversation is the lecture's own and
-comes back when the project is reopened (``chat.json``).
+comes back when the project is reopened (``chat.json``). For the assistant it
+is one conversation too - a session it keeps, which every follow-up continues
+(see :func:`lecture_saver.ask.ask_question`) - until *New chat*.
 
 Asking is the user's explicit act and the only way this panel sends anything:
 the question, the transcript text of the part asked about (or of the whole
@@ -41,9 +43,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..ask import ask_engine_from_settings
+from ..ask import Reply, ask_engine_from_settings, forget_session
 from ..ask.answer import SEEK_SCHEME, SLIDE_SCHEME, prepare_answer
-from ..ask.prompt import SCOPE_LECTURE, SCOPE_NEARBY, Focus, build_prompt, question_text
+from ..ask.prompt import (
+    SCOPE_LECTURE,
+    SCOPE_NEARBY,
+    Focus,
+    build_follow_up,
+    build_prompt,
+    question_text,
+)
 from ..config import Settings
 from ..core.chat import ROLE_ASSISTANT, ROLE_USER, ChatMessage, Quote
 from ..core.project import Project, ProjectError
@@ -114,6 +123,8 @@ class AskPanel(QFrame):
         self._worker: AskWorker | None = None
         #: The question in flight, already in the conversation.
         self._pending: ChatMessage | None = None
+        #: Whether it continues the conversation's session.
+        self._continuing = False
         self._error = ""
 
         title = QLabel("Ask AI")
@@ -129,7 +140,9 @@ class AskPanel(QFrame):
         )
         self._clear_button = QToolButton()
         self._clear_button.setText("New chat")
-        self._clear_button.setToolTip("Forget this lecture's conversation and start again")
+        self._clear_button.setToolTip(
+            "Forget this lecture's conversation and start again - the assistant forgets it too"
+        )
         self._hide_button = QToolButton()
         self._hide_button.setText("✕")
         self._hide_button.setToolTip("Hide the panel. The conversation is kept.")
@@ -322,9 +335,16 @@ class AskPanel(QFrame):
         document = build_document(project)
         where = self._focus()
         focus = Focus(position=where.position, slide=where.slide, quotes=tuple(self._quotes))
-        prompt = build_prompt(
-            document, text, focus=focus, scope=self.scope, history=list(project.chat.messages)
-        )
+        history = list(project.chat.messages)
+        fresh = build_prompt(document, text, focus=focus, scope=self.scope, history=history)
+        # A follow-up continues the session the conversation is in, carrying
+        # only what that session has not been sent.
+        session = project.chat.session
+        follow_up = None
+        if session is not None and engine.supports_sessions and session.engine == engine.key:
+            follow_up = build_follow_up(
+                document, text, focus=focus, scope=self.scope, history=history, sent=session.sent
+            )
 
         message = ChatMessage(
             role=ROLE_USER, text=text, position=focus.position, slide=focus.slide,
@@ -338,7 +358,8 @@ class AskPanel(QFrame):
         self._input.clear()
         self._refresh_quotes()
 
-        self._worker = AskWorker(prompt, engine)
+        self._continuing = follow_up is not None
+        self._worker = AskWorker(engine, fresh, follow_up=follow_up, session=session)
         self._thread = QThread(self)
         self._worker.answered.connect(self._on_answered)
         self._worker.failed.connect(self._on_failed)
@@ -371,11 +392,17 @@ class AskPanel(QFrame):
         self._thread = None
         self._worker = None
 
-    def _on_answered(self, answer: str) -> None:
+    def _on_answered(self, reply: Reply) -> None:
         self._finish_thread()
         self._pending = None
+        if reply.dropped is not None and (
+            reply.session is None or reply.session.id != reply.dropped.id
+        ):
+            forget_session(reply.dropped)
         if self._project is not None:
-            self._project.chat.add(ChatMessage(role=ROLE_ASSISTANT, text=answer))
+            chat = self._project.chat
+            chat.session = reply.session
+            chat.add(ChatMessage(role=ROLE_ASSISTANT, text=reply.text.strip()))
             self._save()
         self._update_controls()
         self.refresh()
@@ -434,6 +461,7 @@ class AskPanel(QFrame):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        forget_session(project.chat.session)
         project.chat.clear()
         self._error = ""
         self._save()
@@ -453,7 +481,11 @@ class AskPanel(QFrame):
             has_project and not busy and self._project is not None
             and not self._project.chat.is_empty
         )
-        if busy:
+        if busy and self._continuing:
+            self._status.setText(
+                "Asking... (same conversation - only what is new is sent)"
+            )
+        elif busy:
             self._status.setText(
                 "Asking... (the whole lecture takes longer)"
                 if self.scope == SCOPE_LECTURE else "Asking... (usually 10-60 seconds)"
