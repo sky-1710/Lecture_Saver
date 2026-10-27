@@ -80,6 +80,7 @@ Fully local lecture video → transcript → slide-linked notes.
           alignment.py           which speech belongs to which slide (§10)
           sentences.py           where a line may be cut so sentences survive
           keywords.py            slide text -> course terms for Whisper's hints
+          chat.py                the Ask AI conversation (chat.json)
           project.py             project dir layout, create/load/save
         media/
           errors.py
@@ -101,6 +102,9 @@ Fully local lecture video → transcript → slide-linked notes.
         study/                   study pack: preview + quiz (sends text too)
           prompts.py             the two requests and their JSON schemas
           generator.py           ask, validate, shuffle answers, hand back
+        ask/                     Ask AI: questions about the lecture (sends text too)
+          prompt.py              which transcript goes with a question, and how
+          answer.py              cited times/slides -> links; failure wording
         translate/               the ONE part that can send text off-machine
           engine.py              what an engine is; the errors it may raise
           codex_cli.py           Codex CLI via ChatGPT sign-in (subprocess)
@@ -112,7 +116,8 @@ Fully local lecture video → transcript → slide-linked notes.
           start_view.py          new / open project, drag & drop
           lecture_view.py        player + transcript, wired together
           video_player.py        QMediaPlayer widget + transport controls
-          transcript_view.py     virtualised segment list
+          transcript_view.py     virtualised segment list, "Ask AI" on each line
+          ask_panel.py           Ask AI chat under the video
           transcribe_panel.py    model options, progress, cancel
           slide_panel.py         slide navigator: thumbnails + detect controls
           workers.py             QThread wrappers around core pipelines

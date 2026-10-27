@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .alignment import Alignment, align
 from .atomic_io import read_json, write_json_atomic
+from .chat import ChatLog
 from .models import ProjectMeta, StageStatus, Transcript, VideoInfo
 from .slides import SlideSet
 from .study import StudySet
@@ -39,6 +40,8 @@ SLIDES_FILE = "slides.json"
 TRANSLATIONS_FILE = "translations.json"
 #: The preview and the review quiz an assistant wrote for the study pack.
 STUDY_FILE = "study.json"
+#: Questions asked about the lecture and the assistant's answers.
+CHAT_FILE = "chat.json"
 
 
 class ProjectError(RuntimeError):
@@ -89,6 +92,8 @@ class Project:
         self.translations = TranslationSet()
         #: Study pack material. Empty until the user makes one.
         self.study = StudySet()
+        #: The conversation with the assistant. Empty until a question is asked.
+        self.chat = ChatLog()
 
     # -- paths --------------------------------------------------------------
 
@@ -111,6 +116,10 @@ class Project:
     @property
     def study_file(self) -> Path:
         return self.root / STUDY_FILE
+
+    @property
+    def chat_file(self) -> Path:
+        return self.root / CHAT_FILE
 
     @property
     def slides_file(self) -> Path:
@@ -256,6 +265,7 @@ class Project:
         project = cls(root, meta, transcript, slides)
         project.translations = cls._load_translations(root)
         project.study = cls._load_study(root)
+        project.chat = cls._load_chat(root)
         return project
 
     @staticmethod
@@ -269,6 +279,18 @@ class Project:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
             log.warning("Ignoring an unreadable %s", STUDY_FILE, exc_info=True)
             return StudySet()
+
+    @staticmethod
+    def _load_chat(root: Path) -> ChatLog:
+        """Read chat.json. A damaged file costs the conversation, not the project."""
+        path = root / CHAT_FILE
+        if not path.is_file():
+            return ChatLog()
+        try:
+            return ChatLog.from_dict(read_json(path))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            log.warning("Ignoring an unreadable %s", CHAT_FILE, exc_info=True)
+            return ChatLog()
 
     @staticmethod
     def _load_translations(root: Path) -> TranslationSet:
@@ -352,6 +374,12 @@ class Project:
             write_json_atomic(self.study_file, self.study.to_dict())
         except OSError as exc:
             raise ProjectError(f"Could not save {STUDY_FILE}:\n{exc}") from exc
+
+    def save_chat(self) -> None:
+        try:
+            write_json_atomic(self.chat_file, self.chat.to_dict())
+        except OSError as exc:
+            raise ProjectError(f"Could not save {CHAT_FILE}:\n{exc}") from exc
 
     def save_translations(self) -> None:
         try:

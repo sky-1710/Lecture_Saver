@@ -1,7 +1,7 @@
 """The main three-pane lecture workspace (§11).
 
 Left: slide navigator - thumbnails, numbers, timestamps, click-to-seek.
-Centre: video player.
+Centre: video player, and under it the Ask AI panel when it is open.
 Right: transcription controls and the transcript, either for the current slide
 (with its picture and time range) or for the whole lecture.
 
@@ -14,6 +14,8 @@ other and the rules can be changed in one place:
 * Clicking a slide shows it and seeks to its start.
 * Clicking a segment seeks to it; the slide then follows from the position.
 * While a segment is being typed in, playback never moves the list away from it.
+* A time or slide an AI answer cites works like a search result: the video
+  seeks there and the line or slide is shown.
 
 Transcript edits made here are applied to the project's single transcript store
 and announced with :attr:`LectureView.transcriptEdited`, so the window can
@@ -48,7 +50,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..ask.prompt import Focus
+from ..config import Settings
 from ..core.alignment import Alignment, align
+from ..core.chat import Quote
 from ..core.models import StageStatus
 from ..core.project import Project
 from ..core.search import SearchHit, search_lecture
@@ -59,6 +64,7 @@ from ..export.document import pair_timed_translation
 from ..slides.slide_text import unavailable_reason
 from ..transcription.resume import resume_point
 from ..transcription.whisper_engine import WhisperOptions
+from .ask_panel import AskPanel
 from .find_bar import FindBar
 from .slide_panel import SlidePanel
 from .theme import Role, set_flag, set_role
@@ -311,17 +317,38 @@ class LectureView(QWidget):
             "Keep the selected slide and the transcript in step with the video "
             "as it plays."
         )
+        self._ask_button = QPushButton("Ask AI")
+        self._ask_button.setCheckable(True)
+        self._ask_button.setToolTip(
+            "Ask an AI assistant about the lecture while you watch.\n"
+            "To ask about a line, use the Ask AI button on it in the transcript."
+        )
         follow_bar = QHBoxLayout()
         follow_bar.setContentsMargins(0, 0, 0, 0)
+        follow_bar.addWidget(self._ask_button)
         follow_bar.addStretch(1)
         follow_bar.addWidget(self._follow_check)
 
-        centre = QWidget()
-        centre_layout = QVBoxLayout(centre)
-        centre_layout.setContentsMargins(0, 0, 0, 0)
-        centre_layout.setSpacing(6)
-        centre_layout.addWidget(self._player, 1)
-        centre_layout.addLayout(follow_bar)
+        video_area = QWidget()
+        video_layout = QVBoxLayout(video_area)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_layout.setSpacing(6)
+        video_layout.addWidget(self._player, 1)
+        video_layout.addLayout(follow_bar)
+
+        # Questions go under the video: the transcript stays in view beside
+        # them, so a line can be pointed at while reading the answer.
+        self._ask_panel = AskPanel()
+        self._ask_panel.setMinimumHeight(170)
+        self._ask_panel.setVisible(False)
+        self._centre_split = QSplitter(Qt.Orientation.Vertical)
+        self._centre_split.addWidget(video_area)
+        self._centre_split.addWidget(self._ask_panel)
+        self._centre_split.setStretchFactor(0, 3)
+        self._centre_split.setStretchFactor(1, 2)
+        self._centre_split.setChildrenCollapsible(False)
+        self._centre_split.setHandleWidth(10)
+        centre = self._centre_split
 
         # --- right: transcription + transcript ---
         self._panel = TranscribePanel()
@@ -398,6 +425,7 @@ class LectureView(QWidget):
         self._slide_header.setVisible(False)
 
         self._transcript = TranscriptView()
+        self._transcript.set_ask_enabled(True)
 
         # The imported translation of the slide shown, under its transcript.
         self._translation_panel = QFrame()
@@ -552,6 +580,16 @@ class LectureView(QWidget):
         self._slides_pane.moveBoundaryRequested.connect(self._on_move_boundary)
         self._slides_pane.separateRequested.connect(self.slideSeparateRequested)
 
+        self._ask_button.toggled.connect(self._set_ask_visible)
+        self._ask_panel.hideRequested.connect(lambda: self._ask_button.setChecked(False))
+        self._ask_panel.seekRequested.connect(self.go_to_time)
+        self._ask_panel.slideRequested.connect(self.go_to_slide)
+        self._ask_panel.set_focus_provider(self._ask_focus)
+        self._transcript.askRequested.connect(self.ask_about_segment)
+        self._transcript.explainRequested.connect(
+            lambda segment_id: self.ask_about_segment(segment_id, send=True)
+        )
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         if watched is self._edit_bar and event.type() == QEvent.Type.Resize:
             self._edit_hint.setVisible(self._edit_bar.width() >= 430)
@@ -606,6 +644,7 @@ class LectureView(QWidget):
 
         self.refresh_transcript()
         self.refresh_slides()
+        self._ask_panel.bind(project)
 
     def refresh_transcript(self) -> None:
         """Re-bind the view to the project's transcript - the one source (§14)."""
@@ -626,6 +665,7 @@ class LectureView(QWidget):
         self._panel.set_slide_keywords_available(*_slide_keywords_state(self._project))
 
     def close_project(self) -> None:
+        self._ask_panel.bind(None)
         self._project = None
         self._player.clear()
         self._transcript.clear_segments()
@@ -866,10 +906,11 @@ class LectureView(QWidget):
 
     @property
     def edit_actions(self) -> list[QAction]:
-        """Undo, redo, find & replace, search, tidy and reset, for the Edit menu."""
+        """Undo, redo, find & replace, search, tidy, reset and asking, for the Edit menu."""
         return [
             self._undo_action, self._redo_action, self._find_action,
             self._search_action, self._split_action, self._reset_action,
+            self._ask_action,
         ]
 
     def _build_edit_actions(self) -> None:
@@ -905,6 +946,12 @@ class LectureView(QWidget):
             "was transcribed. Undo brings your corrections back."
         )
         self._reset_action.triggered.connect(self.reset_to_original)
+        self._ask_action = QAction("Ask AI about this line", self)
+        self._ask_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        self._ask_action.setToolTip(
+            "Ask an AI assistant about the selected line - or the one playing."
+        )
+        self._ask_action.triggered.connect(self.ask_about_current_line)
 
         self._undo_button.setDefaultAction(self._undo_action)
         self._redo_button.setDefaultAction(self._redo_action)
@@ -935,6 +982,7 @@ class LectureView(QWidget):
         self._find_action.setEnabled(bool(store and not store.is_empty))
         self._reset_action.setEnabled(bool(store and not store.is_empty))
         self._search_action.setEnabled(bool(store and not store.is_empty))
+        self._ask_action.setEnabled(bool(store and not store.is_empty))
         self._split_action.setEnabled(
             bool(store and not store.is_empty and self._appearance_starts)
         )
@@ -1285,6 +1333,110 @@ class LectureView(QWidget):
             lambda st: st.replace_everywhere(query, replacement, case_sensitive=case),
             None, f"Replaced {count} occurrence{'s' if count != 1 else ''}",
         )
+
+    # -- asking the assistant ---------------------------------------------------
+
+    @property
+    def ask_panel(self) -> AskPanel:
+        return self._ask_panel
+
+    def set_settings(self, settings: Settings) -> None:
+        """The user's settings: the agreement to send text, and the engine."""
+        self._ask_panel.set_settings(settings)
+
+    def shutdown(self) -> None:
+        """Stop work this view runs in the background, before the window closes."""
+        self._ask_panel.shutdown()
+
+    def show_ask_panel(self) -> None:
+        self._ask_button.setChecked(True)
+
+    def _set_ask_visible(self, visible: bool) -> None:
+        self._ask_panel.setVisible(visible)
+        # The theme draws no "checked" state, so the open panel's button says so.
+        set_flag(self._ask_button, "accent", visible)
+        if not visible:
+            return
+        # Opened for the first time, the splitter has no height for it yet.
+        sizes = self._centre_split.sizes()
+        total = sum(sizes)
+        if total > 0 and sizes[1] < self._ask_panel.minimumHeight():
+            self._centre_split.setSizes([total // 2, total - total // 2])
+        self._ask_panel.focus_input()
+
+    def _ask_focus(self) -> Focus:
+        """Where the user is: playback, and the slide whose transcript is shown."""
+        missing = self._project is None or self._project.video_missing
+        position = None if missing else self._player.position
+        slide = None
+        if self._project is not None and self._project.slides.appearances:
+            appearance = self.shown_appearance if self.showing_current_slide else None
+            if appearance is None and position is not None:
+                index = self._appearance_index_at(position)
+                appearances = self._project.slides.appearances
+                appearance = appearances[index] if 0 <= index < len(appearances) else None
+            slide = appearance.appearance_id if appearance is not None else None
+        return Focus(position=position, slide=slide)
+
+    def ask_about_segment(self, segment_id: str, words: str = "", *, send: bool = False) -> None:
+        """Point the assistant at a line - or at ``words`` picked out of it -
+        and, with ``send``, ask for it to be explained straight away."""
+        store = self._store()
+        segment = store.get(segment_id) if store is not None else None
+        if segment is None:
+            return
+        text = (words or segment.effective_text).strip()
+        if not text:
+            return
+        self.show_ask_panel()
+        self._ask_panel.add_quote(Quote(segment_id=segment.id, start=segment.start, text=text))
+        if send:
+            self._ask_panel.ask()
+
+    def ask_about_current_line(self) -> None:
+        """The selected line, else the line being played; else just open the panel."""
+        if self._project is None:
+            return
+        index = self._transcript.currentIndex()
+        segment = (
+            self._transcript.model().data(index, Qt.ItemDataRole.UserRole + 2)
+            if index.isValid() else None
+        )
+        if segment is None:
+            playing = self._project.transcript.index_at(self._player.position)
+            segments = self._project.transcript.segments
+            segment = segments[playing] if playing is not None else None
+        if segment is None:
+            self.show_ask_panel()
+        else:
+            self.ask_about_segment(segment.id)
+
+    def go_to_time(self, seconds: float) -> None:
+        """Follow a time an answer cited: the slide, the video and the line."""
+        if self._project is None:
+            return
+        index = self._appearance_index_at(seconds)
+        if index >= 0 and not self.showing_search:
+            self._show_appearance(index, seconds)
+        self._on_seek_requested(seconds)
+        spoken_at = self._project.transcript.index_at(seconds)
+        row = self._rows.get(spoken_at, -1) if spoken_at is not None else -1
+        self._transcript.select_row(row)
+        self._highlight(seconds)
+
+    def go_to_slide(self, number: int) -> None:
+        """Follow a slide an answer cited: show it and seek to its start."""
+        if self._project is None:
+            return
+        appearances = self._project.slides.appearances
+        index = next((i for i, a in enumerate(appearances) if a.appearance_id == number), -1)
+        if index < 0:
+            return
+        start = appearances[index].start
+        self._shown = index
+        self._tabs.setCurrentIndex(TAB_SLIDE)
+        self._show_transcript(start)
+        self._on_seek_requested(start)
 
     # -- transcription run state -------------------------------------------
 

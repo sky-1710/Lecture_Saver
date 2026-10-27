@@ -1,9 +1,9 @@
 """The one-time agreement before any lecture text is sent to an assistant.
 
-Translation and the study pack send the same thing - the transcript text -
-to the same place, so they share one agreement and one setting. Agreeing in
-either covers both; the wording names both so nobody agrees to one and is
-surprised by the other.
+Translation, the study pack and Ask AI send the same thing - the transcript
+text - to the same place, so they share one agreement and one setting.
+Agreeing in any of them covers all three; the wording names each so nobody
+agrees to one and is surprised by another.
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ def consent_text(engine_label: str) -> str:
     return (
         "Lecture Saver does everything else on this computer. This feature is "
         "different.<br><br>"
-        "To translate the lecture or write study material from it, the lecture's "
+        "To translate the lecture, write study material from it, or answer your "
+        "questions about it, the lecture's "
         f"<b>transcript text</b> is sent to {engine_label}. "
         "That text leaves this computer.<br><br>"
         "<b>What is never sent:</b> the video, the audio, and the slide images. "

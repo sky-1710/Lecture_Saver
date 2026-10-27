@@ -9,11 +9,11 @@ on a port. Transcription, slide detection and every export run on your own
 CPU (and, for the Turbo model, the Intel integrated GPU), and once a Whisper
 model is downloaded the application works offline.
 
-**Two features are an exception, and they are off until you turn them on.**
-*Translate with AI* and *Study pack* send the transcript **text** to an AI
-assistant — to translate it into Korean, or to write a preview and a review
-quiz from it — because no local model on a laptop without a GPU does either
-well in reasonable time. The video, the audio and the slide images are never
+**Three features are an exception, and they are off until you turn them on.**
+*Translate with AI*, *Study pack* and *Ask AI* send the transcript **text** to
+an AI assistant — to translate it into Korean, to write a preview and a review
+quiz from it, or to answer your questions about it — because no local model on
+a laptop without a GPU does any of these well in reasonable time. The video, the audio and the slide images are never
 sent — only the words. The application asks, in as many words, before the first
 lecture is ever sent, and you can leave it switched off and translate by hand
 instead with *AI translation request*.
@@ -153,6 +153,19 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    because models tend to put the right answer in the same place.
 10. **Search** (Ctrl+Shift+F, or the *Search* tab) to find where anything was
    said; click a result to jump to that slide and moment.
+11. **Ask AI** when something does not make sense. *Ask AI* under the video
+   opens a chat beside the transcript: ask anything about the lecture. To ask
+   about particular words, use the **Ask AI** button that appears on a
+   transcript line when you point at it (or select it), or right-click the
+   line — *Ask AI about this line...* or *Explain this line with AI*. The line
+   waits above the input; type a question, or press Enter with nothing typed to
+   have it explained. Gather several lines first to ask about them together.
+   Ctrl+Shift+A does the same for the selected line (or the one playing), and
+   while editing a line you can select a few words and right-click → *Ask AI
+   about “…”*. Answers cite the lecture — click a time such as `00:12:34` or
+   *Slide 8* and the video goes there. *This part* sends the slide you are on
+   and the slides either side of it (quick); *Whole lecture* sends everything,
+   for questions that span it. The conversation is saved with the lecture.
 
 Reopening a project restores everything.
 
@@ -346,6 +359,25 @@ to one language for the whole recording.
   **Nothing is sent to any AI service**; the files are for you to use. A
   lecture transcribed as Korean asks before creating one
 
+### Ask AI ✅
+
+- A chat under the video about the lecture: ask at any moment, or point at
+  transcript lines first with the **Ask AI** button on a line, its right-click
+  menu, or Ctrl+Shift+A — even a few words selected while editing a line
+- Each question carries where you are: the playback position, the slide shown
+  and the lines pointed at. *This part* sends that slide and its neighbours
+  (without slides, the few minutes around that moment); *Whole lecture* sends
+  every line. Earlier turns go along, so follow-ups work. Corrections you made
+  are what is sent; blanked lines are not
+- Answers are in the language you ask in, and cite the lecture as
+  `[00:12:34]` and *Slide 8*; both are links that seek the video and show the
+  slide and line
+- A question that fails (usage limit, no sign-in, Stop) is put back in the box
+  with its lines rather than lost
+- Saved per lecture in `chat.json`; *New chat* forgets it. Set `"ask_model"` in
+  `%APPDATA%\LectureSaver\settings.json` to use another model for questions
+  than for translation
+
 ### Translation import ✅
 
 - *Import translation* reads an AI assistant's answer to the translation
@@ -396,6 +428,7 @@ Lecture 01/
   project.json                  video reference, metadata, stage states, settings
   transcript.json               the authoritative transcript
   translations.json             imported slide translations
+  chat.json                     the Ask AI conversation
   transcript_original.json      Whisper's output as transcribed, kept for
                                 "Reset to original"; never touched by editing
   slides.json                   detected slides and their appearance intervals
@@ -593,16 +626,17 @@ testable without a GUI or a lecture recording.
   Whisper weights. Pre-download a model, and the application never needs the
   internet again.
 
-### The one exception: *Translate with AI* and *Study pack*
+### The one exception: *Translate with AI*, *Study pack* and *Ask AI*
 
 Everything above holds with these switched off, which is how they ship. They
-share one agreement — agree in either and both may send — and switching it on
-changes this, and only this:
+share one agreement — agree in any of them and all three may send — and
+switching it on changes this, and only this:
 
 | | Sent to the assistant |
 |---|---|
 | Transcript text (the words, slide by slide) | **yes** |
 | Slide numbers and their labels | **yes** |
+| Your questions, and the earlier turns of that lecture's chat (*Ask AI*) | **yes** |
 | Video file | no |
 | Audio | no |
 | Slide images | no |
@@ -611,7 +645,7 @@ changes this, and only this:
 
 - Nothing is sent until you agree to it once, in a dialog that says what
   leaves the computer. The setting lives in `%APPDATA%\LectureSaver`.
-- Both run through the **Codex CLI**, signed in with your own ChatGPT
+- All three run through the **Codex CLI**, signed in with your own ChatGPT
   account. Lecture Saver stores no API key and never sees your sign-in — it
   runs the program you already have and reads back what it prints.
 - Codex is run with `--ephemeral`, so the lecture is not written into a
@@ -619,6 +653,10 @@ changes this, and only this:
   your files.
 - Turn it off again and the rest of the application keeps working with no
   internet connection.
+
+*Ask AI* sends only when you ask: your question, the lines you pointed at,
+the transcript of the part you asked about (or of the whole lecture, if you
+chose that) and the conversation so far.
 
 The study pack's preview and quiz are made from the same transcript text,
 in two requests of the whole lecture — an overview and a quiz both need to

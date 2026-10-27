@@ -1969,3 +1969,123 @@ class TestSpaceKey:
         editing_view._player.clear()
         self._press_space(editing_view._transcript)
         assert calls == []
+
+
+class TestAskAI:
+    """Ask AI from the lecture: a line's button, the panel, and the way back.
+
+    The assistant is a fake from :mod:`tests.test_ask`; nothing is sent.
+    """
+
+    @pytest.fixture
+    def asking_view(self, editing_view, tmp_path):
+        from tests.test_ask import FakeEngine
+
+        settings = Settings(tmp_path / "ask-settings.json")
+        settings.translation_enabled = True  # agreed already: no dialog headless
+        editing_view.set_settings(settings)
+        engine = FakeEngine(answer="답 [00:00:31]")
+        editing_view.ask_panel.engine_factory = lambda: engine
+        editing_view.engine = engine
+        yield editing_view
+        editing_view.shutdown()
+
+    def _click(self, transcript, point, *, double=False):
+        from PySide6.QtTest import QTest
+
+        click = QTest.mouseDClick if double else QTest.mouseClick
+        click(transcript.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+              point)
+        QApplication.processEvents()
+
+    def _button_point(self, transcript, row):
+        rect = transcript.visualRect(transcript.model().index(row, 0))
+        return transcript.itemDelegate().ask_rect(rect).center()
+
+    def test_the_button_on_a_line_asks_about_it_without_seeking(self, asking_view):
+        transcript = asking_view._transcript
+        asked: list[tuple[str, str]] = []
+        seeks: list[float] = []
+        transcript.askRequested.connect(lambda sid, words: asked.append((sid, words)))
+        transcript.seekRequested.connect(seeks.append)
+
+        self._click(transcript, self._button_point(transcript, 1))
+
+        assert asked == [("segment_002", "")]
+        assert seeks == []
+        assert asking_view.ask_panel.isVisibleTo(asking_view)
+        assert [q.segment_id for q in asking_view.ask_panel.quotes] == ["segment_002"]
+
+    def test_double_clicking_the_button_does_not_start_an_edit(self, asking_view):
+        transcript = asking_view._transcript
+        self._click(transcript, self._button_point(transcript, 0), double=True)
+        assert not transcript.is_editing
+
+    def test_clicking_the_text_still_seeks(self, asking_view):
+        transcript = asking_view._transcript
+        seeks: list[float] = []
+        transcript.seekRequested.connect(seeks.append)
+        rect = transcript.visualRect(transcript.model().index(1, 0))
+        self._click(transcript, rect.center() + QPoint(rect.width() // 4, 0))
+        assert seeks == [10.0]
+
+    def test_a_plain_transcript_list_has_no_button(self, qapp, project):
+        view = TranscriptView()
+        view.set_segments(project.transcript.segments)
+        assert not view.shows_ask_button(0)
+
+    def test_explain_sends_the_line_straight_away(self, asking_view, project_with_slides):
+        asking_view._transcript.explainRequested.emit("segment_003")
+        assert pump_until(lambda: not asking_view.ask_panel.is_busy, timeout=10)
+
+        prompt = asking_view.engine.prompts[0]
+        assert "[00:00:30] If the value is too large, the model diverges." in prompt
+        assert [m.role for m in project_with_slides.chat.messages] == ["user", "assistant"]
+
+    def test_words_picked_out_of_a_line_are_what_is_quoted(self, asking_view):
+        asking_view.ask_about_segment("segment_002", "러닝레이트")
+        assert [q.text for q in asking_view.ask_panel.quotes] == ["러닝레이트"]
+
+    def test_the_question_knows_the_slide_shown(self, asking_view):
+        asking_view._tabs.setCurrentIndex(0)
+        asking_view._show_appearance(1)
+        assert asking_view._ask_focus().slide == 2
+
+    def test_a_cited_time_shows_its_slide_and_line(self, asking_view):
+        asking_view._tabs.setCurrentIndex(0)
+        asking_view.go_to_time(31.0)
+        assert asking_view.shown_appearance.appearance_id == 2
+        segment = asking_view._transcript.currentIndex().data(Qt.ItemDataRole.UserRole + 2)
+        assert segment.id == "segment_003"
+
+    def test_a_cited_slide_is_shown(self, asking_view):
+        asking_view._tabs.setCurrentIndex(1)
+        asking_view.go_to_slide(2)
+        assert asking_view.showing_current_slide
+        assert asking_view.shown_appearance.appearance_id == 2
+
+    def test_the_panel_hides_and_comes_back(self, asking_view):
+        asking_view.show_ask_panel()
+        assert asking_view.ask_panel.isVisibleTo(asking_view)
+        asking_view.ask_panel.hideRequested.emit()
+        assert not asking_view.ask_panel.isVisibleTo(asking_view)
+        assert not asking_view._ask_button.isChecked()
+
+
+def test_closing_the_window_stops_a_question_in_flight(qapp, project, tmp_path):
+    from tests.test_ask import FakeEngine
+
+    settings = Settings(tmp_path / "settings.json")
+    settings.translation_enabled = True
+    window = MainWindow(settings)
+    window._open_project_at(project.root)
+    engine = FakeEngine(hang=True)
+    panel = window._lecture_view.ask_panel
+    panel.engine_factory = lambda: engine
+    panel._input.setPlainText("질문")
+    assert panel.ask()
+    assert panel.is_busy
+
+    window.close()
+    assert not panel.is_busy
+    assert window.project.chat.is_empty

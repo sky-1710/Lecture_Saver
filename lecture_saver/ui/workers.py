@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 ProgressReport = Callable[[str, float], None]
 
 __all__ = [
+    "AskWorker",
     "ExportWorker",
     "JobWorker",
     "ProgressReport",
@@ -288,6 +289,47 @@ class TranslationWorker(QObject):
             self.failed.emit(str(exc))
             return
         self.finished.emit(report)
+
+
+class AskWorker(QObject):
+    """Asks the assistant one question about the lecture.
+
+    The prompt is built on the UI thread from a snapshot of the transcript;
+    this thread only waits for the answer, which can take a minute.
+    """
+
+    answered = Signal(str)
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, prompt: str, engine: object) -> None:
+        super().__init__()
+        self._prompt = prompt
+        self._engine = engine
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    @Slot()
+    def run(self) -> None:
+        from ..ask.answer import failure_message
+        from ..translate.engine import TranslationCancelled, TranslationError
+
+        try:
+            answer = self._engine.ask(self._prompt, cancel=self._cancel)  # type: ignore[attr-defined]
+        except TranslationCancelled:
+            self.cancelled.emit()
+            return
+        except Exception as exc:  # noqa: BLE001 - a worker must never crash the app
+            if not isinstance(exc, TranslationError):
+                log.exception("Asking the assistant failed")
+            self.failed.emit(failure_message(exc))
+            return
+        if self._cancel.is_set():
+            self.cancelled.emit()
+            return
+        self.answered.emit(str(answer).strip())
 
 
 class StudyPackWorker(QObject):

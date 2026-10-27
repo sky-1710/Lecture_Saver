@@ -8,6 +8,11 @@ default - is what makes applications like this crawl on long lectures. The one
 exception is the row being edited, which gets a real text editor for as long as
 the edit lasts.
 
+Each line can also be asked about: an "Ask AI" button appears in the
+timestamp gutter of the line under the mouse and of the selected line, and the
+right-click menu has the same. The view only reports which line (or which
+words of it) - the lecture view decides what asking means.
+
 The view never changes the transcript itself. It reports what the user did -
 typed text, asked to merge, split, delete - as signals, and the owner applies
 those to the project's single :class:`TranscriptStore` (§14). That keeps every
@@ -31,7 +36,17 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QKeyEvent, QPainter, QPalette
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QHelpEvent,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPalette,
+)
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QAbstractItemView,
@@ -41,6 +56,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QToolTip,
     QWidget,
 )
 
@@ -63,10 +79,16 @@ _TIME_WIDTH = 74
 _GAP = 10
 #: Space between a line's text and its translation underneath.
 _TRANSLATION_GAP = 3
+#: The "Ask AI" button, under the timestamp. Fits the shortest row (44 px).
+_ASK_TOP = 18
+_ASK_WIDTH = 52
+_ASK_HEIGHT = 16
+ASK_LABEL = "Ask AI"
 _ACCENT = QColor(theme.ACCENT)
 _ACCENT_SOFT = QColor(theme.ACCENT_SOFT)
 _EDITED = QColor(theme.WARNING_TEXT)
 _TRANSLATION = QColor(theme.TRANSLATION)
+_SURFACE = QColor(theme.SURFACE)
 
 
 class TranscriptModel(QAbstractListModel):
@@ -197,6 +219,8 @@ class SegmentEditor(QPlainTextEdit):
     finishRequested = Signal()
     cancelRequested = Signal()
     splitRequested = Signal(int)
+    #: Ask the assistant about the selected words.
+    askRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -213,6 +237,8 @@ class SegmentEditor(QPlainTextEdit):
         self.initial_text = ""
         #: The segment being edited.
         self.segment_id = ""
+        #: Whether the right-click menu offers asking about a selection.
+        self.can_ask = False
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt naming
         key = event.key()
@@ -235,6 +261,12 @@ class SegmentEditor(QPlainTextEdit):
             lambda: self.splitRequested.emit(self.cursorForPosition(point).position())
         )
         menu.addAction(split)
+        selected = self.textCursor().selectedText().strip()
+        if self.can_ask and selected:
+            shown = selected if len(selected) <= 24 else selected[:23] + "…"
+            ask = QAction(f"Ask AI about “{shown}”", menu)
+            ask.triggered.connect(lambda: self.askRequested.emit(selected))
+            menu.addAction(ask)
         menu.exec(self.mapToGlobal(point))
 
 
@@ -245,6 +277,8 @@ class SegmentDelegate(QStyledItemDelegate):
     textEdited = Signal(str, str)
     #: Split the segment at a character offset of its text.
     splitRequested = Signal(str, int)
+    #: Ask about words selected in the editor: segment id, the words.
+    askRequested = Signal(str, str)
 
     def __init__(self, view: QListView) -> None:
         super().__init__(view)
@@ -253,6 +287,22 @@ class SegmentDelegate(QStyledItemDelegate):
         self._time_font.setPointSizeF(max(7.5, view.font().pointSizeF() - 1.0))
         self._marker_font = QFont(view.font())
         self._marker_font.setPointSizeF(max(7.0, view.font().pointSizeF() - 1.5))
+
+    @staticmethod
+    def ask_rect(row_rect: QRect) -> QRect:
+        """Where a row's "Ask AI" button is: in the gutter, under the time."""
+        return QRect(
+            row_rect.left() + _PAD_X, row_rect.top() + _PAD_Y + _ASK_TOP, _ASK_WIDTH, _ASK_HEIGHT
+        )
+
+    def _paint_ask(self, painter: QPainter, row_rect: QRect, hovered: bool) -> None:
+        rect = self.ask_rect(row_rect)
+        painter.setPen(_ACCENT)
+        painter.setBrush(_ACCENT if hovered else _SURFACE)
+        painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 7, 7)
+        painter.setFont(self._marker_font)
+        painter.setPen(_SURFACE if hovered else _ACCENT)
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), ASK_LABEL)
 
     def _text_width(self, option: QStyleOptionViewItem) -> int:
         width = option.rect.width()
@@ -352,7 +402,11 @@ class SegmentDelegate(QStyledItemDelegate):
             format_hms(start),
         )
 
-        if index.data(ROLE_IS_EDITED):
+        view = self._view
+        if isinstance(view, TranscriptView) and view.shows_ask_button(index.row()):
+            # Takes the "edited" marker's place; the tooltip still says so.
+            self._paint_ask(painter, opt.rect, view.ask_button_hovered(index.row()))
+        elif index.data(ROLE_IS_EDITED):
             painter.setFont(self._marker_font)
             painter.setPen(_EDITED)
             painter.drawText(
@@ -430,6 +484,8 @@ class SegmentDelegate(QStyledItemDelegate):
         editor.splitRequested.connect(
             lambda offset: self._split(editor, segment_id, offset)
         )
+        editor.can_ask = isinstance(self._view, TranscriptView) and self._view.ask_enabled
+        editor.askRequested.connect(lambda words: self.askRequested.emit(segment_id, words))
         return editor
 
     def setEditorData(  # noqa: N802 - Qt naming
@@ -487,6 +543,11 @@ class TranscriptView(QListView):
     mergeRequested = Signal(str)
     insertRequested = Signal(str)
     deleteRequested = Signal(str)
+    #: Ask the assistant about a line: segment id, and the words picked out
+    #: of it ("" for the whole line).
+    askRequested = Signal(str, str)
+    #: Have the assistant explain a line straight away.
+    explainRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -510,16 +571,25 @@ class TranscriptView(QListView):
         #: Suppresses follow-playback auto-scroll while the user is reading
         #: elsewhere; re-armed when they click a segment or playback is sought.
         self._follow_playback = True
+        #: Whether lines offer "Ask AI". Off until someone handles the request.
+        self._ask_enabled = False
+        #: The row under the mouse, and whether the mouse is on its button.
+        self._hover_row = -1
+        self._hover_ask = False
+        #: A press on an "Ask AI" button: its row, so the release can match it.
+        self._ask_press_row: int | None = None
 
         self.clicked.connect(self._on_clicked)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self._delegate.textEdited.connect(self._on_text_edited)
         self._delegate.splitRequested.connect(self.splitRequested)
+        self._delegate.askRequested.connect(self.askRequested)
 
     # -- content ------------------------------------------------------------
 
     def set_segments(self, segments: Sequence[TranscriptSegment]) -> None:
         self.finish_editing()
+        self._hover_row, self._hover_ask = -1, False
         self._model.set_segments(segments)
         self.scheduleDelayedItemsLayout()
 
@@ -593,6 +663,113 @@ class TranscriptView(QListView):
             self.editingFinished.emit(segment_id)
             self.refresh_segment(segment_id)
 
+    # -- asking about a line --------------------------------------------------
+
+    @property
+    def ask_enabled(self) -> bool:
+        return self._ask_enabled
+
+    def set_ask_enabled(self, enabled: bool) -> None:
+        self._ask_enabled = enabled
+        self.viewport().update()
+
+    def shows_ask_button(self, row: int) -> bool:
+        """The button shows on the line under the mouse and the selected one,
+        but not on a line being typed in."""
+        if not self._ask_enabled or row < 0:
+            return False
+        current = self.currentIndex().row() if self.currentIndex().isValid() else -1
+        if self.is_editing and row == current:
+            return False
+        return row in (self._hover_row, current)
+
+    def ask_button_hovered(self, row: int) -> bool:
+        return self._hover_ask and row == self._hover_row
+
+    def ask_button_at(self, pos: QPoint) -> int:
+        """The row whose "Ask AI" button is at ``pos`` (viewport coordinates), or -1."""
+        if not self._ask_enabled:
+            return -1
+        index = self.indexAt(pos)
+        if not index.isValid() or not self._delegate.ask_rect(self.visualRect(index)).contains(pos):
+            return -1
+        if self.is_editing and index == self.currentIndex():
+            return -1
+        return index.row()
+
+    def ask_about_row(self, row: int) -> None:
+        segment = self._model.segment_at_row(row)
+        if segment is None:
+            return
+        self.finish_editing()
+        self.setCurrentIndex(self._model.index(row, 0))
+        self.askRequested.emit(segment.id, "")
+
+    def _set_hover(self, row: int, on_button: bool) -> None:
+        if (row, on_button) == (self._hover_row, self._hover_ask):
+            return
+        for changed in {self._hover_row, row}:
+            if changed >= 0:
+                self.viewport().update(self.visualRect(self._model.index(changed, 0)))
+        self._hover_row, self._hover_ask = row, on_button
+        if on_button:
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
+        pos = event.position().toPoint()
+        index = self.indexAt(pos)
+        self._set_hover(index.row() if index.isValid() else -1, self.ask_button_at(pos) >= 0)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt naming
+        self._set_hover(-1, False)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
+        # A press on the button is the button's alone: it must not select,
+        # seek or start an edit underneath it.
+        row = self.ask_button_at(event.position().toPoint())
+        if row >= 0 and event.button() == Qt.MouseButton.LeftButton:
+            self._ask_press_row = row
+            event.accept()
+            return
+        self._ask_press_row = None
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
+        if self._ask_press_row is not None:
+            row, self._ask_press_row = self._ask_press_row, None
+            if row >= 0 and self.ask_button_at(event.position().toPoint()) == row:
+                self.ask_about_row(row)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
+        if self.ask_button_at(event.position().toPoint()) >= 0:
+            # The second click of a double click: swallow it and its release.
+            self._ask_press_row = -1
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def viewportEvent(self, event: QEvent) -> bool:  # noqa: N802 - Qt naming
+        if (
+            event.type() == QEvent.Type.ToolTip
+            and isinstance(event, QHelpEvent)
+            and self.ask_button_at(event.pos()) >= 0
+        ):
+            QToolTip.showText(
+                event.globalPos(),
+                "Ask AI about this line. Type a question, or just press Enter to "
+                "have it explained.",
+                self.viewport(),
+            )
+            return True
+        return super().viewportEvent(event)
+
     # -- synchronisation ----------------------------------------------------
 
     def highlight_row(self, row: int, *, scroll: bool = True) -> None:
@@ -641,9 +818,20 @@ class TranscriptView(QListView):
         insert = menu.addAction("Add segment after")
         menu.addSeparator()
         delete = menu.addAction("Delete segment")
+        ask = explain = None
+        if self._ask_enabled:
+            menu.addSeparator()
+            ask = menu.addAction("Ask AI about this line...")
+            explain = menu.addAction("Explain this line with AI")
 
         chosen = menu.exec(self.viewport().mapToGlobal(point))
-        if chosen is edit:
+        if chosen is None:
+            return
+        if chosen is ask:
+            self.askRequested.emit(segment.id, "")
+        elif chosen is explain:
+            self.explainRequested.emit(segment.id)
+        elif chosen is edit:
             self.edit_segment(segment.id)
         elif chosen is restore:
             self.restoreRequested.emit(segment.id)

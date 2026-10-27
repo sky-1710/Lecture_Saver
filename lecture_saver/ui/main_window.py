@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._start_view = StartView()
         self._lecture_view = LectureView()
+        self._lecture_view.set_settings(settings)
         self._stack.addWidget(self._start_view)
         self._stack.addWidget(self._lecture_view)
         self.setCentralWidget(self._stack)
@@ -1376,6 +1377,7 @@ class MainWindow(QMainWindow):
 
         self._wait_for_export()
         self._stop_reading_keywords()
+        self._lecture_view.shutdown()
         self._flush_edits()
         if self.project is not None:
             try:
