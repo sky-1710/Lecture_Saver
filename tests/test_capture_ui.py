@@ -232,7 +232,9 @@ class TestDrawing:
         canvas._memo_editor.setText("first")
         QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
         # Changed in place - and the double-click drew nothing of its own.
-        assert canvas.marks == (Mark.memo(0.5, 0.2, "first"),)
+        assert canvas.marks == (
+            Mark.memo(0.5, 0.2, "first", size=ink.text_fraction(ink.DEFAULT_TEXT_POINTS)),
+        )
         assert canvas.tool == tool
 
     def test_double_clicking_keeps_the_memos_own_ink(self, canvas):
@@ -402,26 +404,41 @@ class TestInk:
 
 
 class TestTextSize:
-    LARGE = dict(ink.TEXT_SIZES)["Large"]
-
     def _type_memo(self, canvas, point, text):
         canvas.set_tool(ink.TOOL_MEMO)
         QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=point)
         canvas._memo_editor.setText(text)
         QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
 
-    def test_medium_to_start_with_and_stored_as_the_default(self, canvas):
-        assert canvas.text_size == ink.MEMO_TEXT_SIZE
-        self._type_memo(canvas, QPoint(400, 90), "normal")
-        assert canvas.marks[0].size == 0.0
-
-    def test_new_memos_are_typed_in_the_size_chosen(self, canvas):
+    def test_a_number_smaller_than_memos_used_to_be(self, canvas):
         bar = ink.InkToolBar(canvas)
-        bar.size_action("Large").trigger()
-        assert canvas.text_size == self.LARGE
+        assert bar.size_box.value() == ink.DEFAULT_TEXT_POINTS == 14
+        assert ink.text_points(0.0) == 20  # what every memo from before is
+        self._type_memo(canvas, QPoint(400, 90), "smaller")
+        assert canvas.marks[0].size == ink.text_fraction(14)
+
+    def test_new_memos_are_typed_in_the_number_chosen(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        bar.size_box.setValue(24)
+        assert canvas.text_size == ink.text_fraction(24)
         self._type_memo(canvas, QPoint(400, 90), "big")
-        assert canvas.marks[0].size == self.LARGE
-        assert bar.size_button.accessibleName() == "Text size: Large"
+        assert canvas.marks[0].size == ink.text_fraction(24)
+
+    def test_minus_and_plus_step_the_number(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        bar.larger_button.click()
+        bar.larger_button.click()
+        assert bar.size_box.value() == 16
+        bar.smaller_button.click()
+        assert canvas.text_size == ink.text_fraction(15)
+        assert bar.larger_button.autoRepeat()
+
+    def test_the_number_is_kept_inside_its_range(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        bar.size_box.setValue(500)
+        assert bar.size_box.value() == ink.MAX_TEXT_POINTS
+        bar.size_box.setValue(1)
+        assert bar.size_box.value() == ink.MIN_TEXT_POINTS
 
     def test_a_larger_memo_takes_more_room(self, canvas):
         rect = canvas.picture_rect()
@@ -430,29 +447,98 @@ class TestTextSize:
         assert large.height() > small.height() * 2
         assert large.width() > small.width() * 2
 
-    def test_a_memo_changed_keeps_its_size(self, canvas):
-        canvas.set_marks([Mark.memo(0.5, 0.2, "big", size=self.LARGE)])
-        canvas.set_text_size(dict(ink.TEXT_SIZES)["Small"])
+    def test_a_memo_from_before_keeps_its_size(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "old")])
         QTest.mouseDClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(410, 100))
-        canvas._memo_editor.setText("still big")
+        canvas._memo_editor.setText("old, changed")
         QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
-        assert canvas.marks[0].size == self.LARGE
+        assert canvas.marks[0].size == 0.0
 
-    def test_choosing_a_size_while_typing_resizes_that_memo(self, canvas):
+    def test_while_a_memo_is_changed_its_number_is_shown(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        canvas.set_marks([Mark.memo(0.5, 0.2, "big", size=ink.text_fraction(30))])
+        QTest.mouseDClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(410, 104))
+        assert bar.size_box.value() == 30
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert bar.size_box.value() == ink.DEFAULT_TEXT_POINTS
+        assert canvas.marks[0].size == ink.text_fraction(30)
+
+    def test_changing_the_number_while_typing_resizes_that_memo(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        bar.show()
         canvas.set_tool(ink.TOOL_MEMO)
         QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(400, 90))
         canvas._memo_editor.setText("growing")
         before = canvas._memo_editor.height()
-        canvas.set_text_size(self.LARGE)
+        # Going to the number to change it does not close the memo.
+        bar.size_box.setFocus()
+        QApplication.processEvents()
+        QApplication.processEvents()
+        assert canvas.is_typing
+        bar.size_box.setValue(36)
         assert canvas._memo_editor.height() > before
-        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
-        assert canvas.marks[0].size == self.LARGE
+        canvas.commit_memo()
+        assert canvas.marks[0].size == ink.text_fraction(36)
 
-    def test_the_menu_offers_four_sizes(self, canvas):
-        bar = ink.InkToolBar(canvas)
-        names = [a.text() for a in bar.size_button.menu().actions()]
-        assert names == ["Small", "Medium", "Large", "Extra large"]
-        assert bar.size_action("Medium").isChecked()
+    def test_leaving_the_memo_for_anything_else_keeps_it(self, canvas, qapp):
+        from PySide6.QtWidgets import QLineEdit
+
+        other = QLineEdit()
+        other.show()
+        canvas.set_tool(ink.TOOL_MEMO)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(400, 90))
+        canvas._memo_editor.setText("kept")
+        other.setFocus()
+        assert pump_until(lambda: not canvas.is_typing, timeout=2)
+        assert [m.text for m in canvas.marks] == ["kept"]
+
+
+class TestMovingMemos:
+    def test_a_memo_dragged_with_the_memo_tool_moves(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "move me", "#1f5fd6", 0.03)])
+        canvas.set_tool(ink.TOOL_MEMO)
+        drag(canvas, QPoint(410, 98), QPoint(210, 323))
+        (memo,) = canvas.marks
+        assert (memo.x1, memo.y1) == pytest.approx((0.25, 0.7))
+        # Only its place changed, and opening it was not what the drag did.
+        assert (memo.text, memo.colour, memo.size) == ("move me", "#1f5fd6", 0.03)
+        assert not canvas.is_typing
+
+    def test_a_move_is_undone_like_any_change(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "here")])
+        canvas.set_tool(ink.TOOL_MEMO)
+        drag(canvas, QPoint(410, 98), QPoint(100, 300))
+        assert canvas.undo()
+        assert canvas.marks == (Mark.memo(0.5, 0.2, "here"),)
+
+    def test_a_click_without_moving_opens_it(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "open me")])
+        canvas.set_tool(ink.TOOL_MEMO)
+        drag(canvas, QPoint(410, 98), QPoint(412, 99))
+        assert canvas.is_typing and canvas._memo_editor.text() == "open me"
+        assert canvas.marks == (Mark.memo(0.5, 0.2, "open me"),)
+
+    def test_it_cannot_be_dragged_off_the_picture(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "edge")])
+        canvas.set_tool(ink.TOOL_MEMO)
+        drag(canvas, QPoint(410, 98), QPoint(2000, -900))
+        (memo,) = canvas.marks
+        assert (memo.x1, memo.y1) == (1.0, 0.0)
+        assert canvas.picture_rect().contains(ink.memo_box(memo, canvas.picture_rect()))
+
+    def test_with_the_pen_a_drag_over_a_memo_draws(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "stays")])
+        drag(canvas, QPoint(410, 98), QPoint(600, 300))
+        assert [m.kind for m in canvas.marks] == [MEMO, PEN]
+        assert canvas.marks[0] == Mark.memo(0.5, 0.2, "stays")
+
+    def test_the_memo_tool_shows_a_memo_can_be_moved(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "hover")])
+        canvas.set_tool(ink.TOOL_MEMO)
+        QTest.mouseMove(canvas, QPoint(410, 98))
+        assert canvas.cursor().shape() == Qt.CursorShape.SizeAllCursor
+        QTest.mouseMove(canvas, QPoint(100, 400))
+        assert canvas.cursor().shape() == Qt.CursorShape.IBeamCursor
 
 
 class TestRendering:

@@ -121,8 +121,8 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    **underline**, **highlight** and an **eraser** (keys 1-4; its arrow picks
    one), and beside it is a typed **memo** (5) - double-click one to change
    it later. The dot beside them picks the **ink**: red, blue, black, green,
-   orange, purple or white; the **A** beside it the memo **text size**. Press
-   **S** (or *Screenshot*)
+   orange, purple or white; the number beside it the memo **text size**. Drag a
+   memo with the memo tool to move it. Press **S** (or *Screenshot*)
    to keep the picture on screen with your marks. *Screenshots* opens them
    beside the video: change any screenshot's marks there, and *Play from*
    replays the stretch you were marking. *Export PDF* at the top of the panel
@@ -389,15 +389,19 @@ to one language for the whole recording.
   button goes back to the kind used last, its arrow picks another. **Memo** (5)
   is typed where you click as plain text, no box: Enter keeps it, Esc drops
   it, and a memo kept is changed by clicking it with the memo tool or
-  double-clicking it with any. Right-click removes a mark with any tool
+  double-clicking it with any. **Drag** a memo with the memo tool to move it
+  (the pointer shows when it can be); Undo puts it back. Right-click removes
+  a mark with any tool
 - **Ink**: the dot after the memo button colours new pen strokes, underlines
   and memos - red, blue, black, green, orange, purple or white (for dark
   slides). Each mark keeps its own; changing the ink while typing a memo
   recolours that memo. Highlights stay yellow
-- **Text size**: the **A** after the ink sets the size of new memos - small,
-  medium (the default), large or extra large, in proportion to the picture so
-  a memo keeps its size on the panel's small view and in the PDF. Each memo
-  keeps its own; choose a size while typing or changing one to resize it
+- **Text size**: the number after the ink (6-72; type it, use - and +, or the
+  mouse wheel) sets the size of new memos - 14 to start with, smaller than
+  memos used to be (20). It is in proportion to the picture, so a memo keeps
+  its size against the slide on the panel's small view and in the PDF. Each
+  memo keeps its own: while one is being typed or changed the number shows
+  its size, and changing the number resizes it
 - **Screenshot** (S) keeps the frame on screen at the video's full resolution,
   with the marks that are showing. Saving happens in the background - about
   13 ms of the interface's time - so taking one at 2x does not stutter
