@@ -705,8 +705,9 @@ disk. Closing, switching lecture and exporting wait for the writes.
 **Where a screenshot belongs.** To the slide appearance on screen at its time
 (as alignment does for speech). Exported on its own, as
 `ExportFormat.SCREENSHOTS` (`pdf.write_screenshots_pdf`): only the
-screenshots, two to an A4 page, through the same `build_pdf` as the notes. In
-the notes only when asked (`PdfOptions.screenshots`, off by default), after the
+screenshots, a page each, the page the picture's shape and the picture filling
+it - drawn on a ReportLab canvas rather than laid out on A4, with the time and
+slide as bookmarks so nothing covers the frame. In the notes only when asked (`PdfOptions.screenshots`, off by default), after the
 paragraph being spoken when it was taken. *Play* starts 2 s before the first
 mark drawn for it - the moment the user started picking things out - not at
 the screenshot.

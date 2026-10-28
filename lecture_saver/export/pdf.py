@@ -16,7 +16,7 @@ The goal is lecture notes rather than a debug dump:
 * The user's screenshots of the video, with their marks drawn in, can sit in the
   transcript where they were taken: after the paragraph being spoken then.
   They also have a PDF of their own, :func:`write_screenshots_pdf`: only the
-  screenshots, two to a page, to print and study from.
+  screenshots, each page exactly one, edge to edge, to print and study from.
 * Korean, English and mixed text all come from one embedded TrueType font. If no
   font that can draw Korean is found the export fails with a clear message
   instead of producing a PDF full of empty boxes.
@@ -51,9 +51,10 @@ __all__ = [
 
 #: Fraction of the text frame's height a slide picture may take.
 MAX_IMAGE_HEIGHT_FRACTION = 0.5
-#: Height left on a page of the screenshots PDF for each one's caption and
-#: spacing, in points - so two fit on a page.
-SCREENSHOT_CAPTION_ROOM = 40
+#: Width of a page of the screenshots PDF, in points: a widescreen PowerPoint
+#: slide's (13.33 in), so a 16:9 lecture prints the way a slide does. Each
+#: page is as high as its picture's shape makes it.
+SCREENSHOT_PAGE_WIDTH = 960.0
 
 _REGULAR = "LectureSaverSans"
 _BOLD = "LectureSaverSans-Bold"
@@ -169,9 +170,11 @@ def write_pdf(
 def write_screenshots_pdf(document: LectureDocument, path: Path) -> None:
     """Write only the screenshots, in the order of the lecture, to ``path``.
 
-    Each one is printed with its marks, as large as two to a page allows, under
-    a line saying which screenshot it is, its time, its slide and where its
-    marking began. Nothing else - the notes PDF is for the transcript.
+    One page per screenshot, the page the shape of the picture and the picture
+    filling it: no margins, no title, no captions - each page is the frame as
+    it was taken, with its marks. Which screenshot a page is, its time, its
+    slide and where its marking began are the PDF's bookmarks instead, where
+    they cover nothing. The JPEGs go in as they are, not re-compressed.
     """
     shots = [
         (section.number, shot) for section in document.sections for shot in section.screenshots
@@ -181,55 +184,69 @@ def write_screenshots_pdf(document: LectureDocument, path: Path) -> None:
             "There are no screenshots to export yet. Press S while the video plays "
             "to take one."
         )
+    try:
+        from reportlab import rl_config
+        from reportlab.pdfgen import canvas
+    except ImportError as exc:
+        raise PdfExportError(
+            "PDF export needs the 'reportlab' package. Install the requirements "
+            "again with: pip install -r requirements.txt"
+        ) from exc
 
-    def story(width: float, height: float) -> list[object]:
-        from reportlab.platypus import KeepTogether, Paragraph, Spacer
-
-        styles = _styles()
-        count = len(shots)
-        meta = [document.video_name, f"{count} screenshot{'s' if count != 1 else ''}",
-                f"Exported {datetime.now():%Y-%m-%d}"]
-        flowables: list[object] = [
-            Paragraph(escape(document.title), styles["title"]),
-            Paragraph(escape("  ·  ".join(meta)), styles["meta"]),
-            Spacer(1, 8),
-        ]
-        room = height / 2 - SCREENSHOT_CAPTION_ROOM
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(prefix=".screenshots_", suffix=".pdf", dir=path.parent)
+    os.close(handle)
+    temp = Path(temp_name)
+    # The pictures are the whole file: kept binary, not spelled out in ASCII
+    # (reportlab's default), which made the PDF a quarter larger.
+    ascii_images, rl_config.useA85 = rl_config.useA85, 0
+    try:
+        pdf = canvas.Canvas(str(temp))
+        pdf.setTitle(f"{document.title} - Screenshots")
+        pdf.setCreator("Lecture Saver")
+        pages = 0
         for position, (slide, shot) in enumerate(shots, start=1):
+            size = _picture_size(shot.image)
+            if size is None:
+                continue
+            height = SCREENSHOT_PAGE_WIDTH * size[1] / size[0]
+            pdf.setPageSize((SCREENSHOT_PAGE_WIDTH, height))
+            pdf.drawImage(str(shot.image), 0, 0, SCREENSHOT_PAGE_WIDTH, height)
             parts = [f"{position}", format_hms(shot.time)]
             if slide is not None:
                 parts.append(f"Slide {slide}")
             if shot.start < shot.time:
                 parts.append(f"marked from {format_hms(shot.start)}")
-            caption = Paragraph(escape("  ·  ".join(parts)), styles["label"])
-            picture = _sized_picture(shot.image, width, room)
-            if picture is None:
-                flowables.append(Paragraph(
-                    escape(f"{parts[0]} · {parts[1]}: the picture could not be read."),
-                    styles["note"],
-                ))
-                continue
-            flowables.append(KeepTogether([caption, picture, Spacer(1, 12)]))
-        return flowables
+            key = f"screenshot-{position}"
+            pdf.bookmarkPage(key)
+            pdf.addOutlineEntry("  ·  ".join(parts), key, level=0)
+            pdf.showPage()
+            pages += 1
+        if not pages:
+            raise PdfExportError("None of the screenshots' pictures could be read.")
+        pdf.save()
+        replace_file(temp, path)
+    except PdfExportError:
+        temp.unlink(missing_ok=True)
+        raise
+    except Exception as exc:  # noqa: BLE001 - report failures, never half a file
+        temp.unlink(missing_ok=True)
+        raise PdfExportError(f"The PDF could not be generated:\n{exc}") from exc
+    finally:
+        rl_config.useA85 = ascii_images
 
-    build_pdf(path, document.title, story)
 
-
-def _sized_picture(path: Path, width: float, height: float) -> object | None:
-    """``path`` as a centred image no larger than ``width`` x ``height``."""
-    from reportlab.platypus import Image
-
+def _picture_size(path: Path) -> tuple[int, int] | None:
+    """A picture's size in pixels, or ``None`` if it cannot be read."""
     try:
         from PIL import Image as PILImage
 
         with PILImage.open(path) as picture:
-            pixel_width, pixel_height = picture.size
+            width, height = picture.size
     except Exception:  # noqa: BLE001 - an unreadable picture must not sink the PDF
         return None
-    scale = min(width / pixel_width, height / pixel_height)
-    image = Image(str(path), width=pixel_width * scale, height=pixel_height * scale)
-    image.hAlign = "CENTER"
-    return image
+    return (width, height) if width > 0 and height > 0 else None
 
 
 def build_pdf(

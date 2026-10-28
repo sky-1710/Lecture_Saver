@@ -204,29 +204,86 @@ class TestPdf:
         assert "learning rate" not in text
 
 
-@needs_korean_font
+def _pdf_pages_and_bookmarks(path: Path) -> tuple[list[tuple[float, float]], list[str], str]:
+    """Each page's size in points, the bookmarks' titles, and all the text."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtPdf import QPdfBookmarkModel, QPdfDocument
+    from PySide6.QtWidgets import QApplication
+
+    _app = QApplication.instance() or QApplication([])  # noqa: F841
+    pdf = QPdfDocument()
+    pdf.load(str(path))
+    sizes = [(pdf.pagePointSize(i).width(), pdf.pagePointSize(i).height())
+             for i in range(pdf.pageCount())]
+    text = "".join(pdf.getAllText(i).text() for i in range(pdf.pageCount()))
+    marks = QPdfBookmarkModel()
+    marks.setDocument(pdf)
+    titles = [marks.index(row, 0).data() for row in range(marks.rowCount())]
+    pdf.close()
+    return sizes, titles, text
+
+
+def _wide_jpeg(path: Path, width: int, height: int) -> None:
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (width, height), (240, 240, 240)).save(path, "JPEG")
+
+
 class TestScreenshotsPdf:
-    def test_only_the_screenshots_with_their_time_and_slide(self, project, tmp_path):
+    def test_one_page_per_screenshot_and_nothing_else(self, project, tmp_path):
+        for second in (5.0, 10.0, 40.0):
+            _add(project, second)
+        target = tmp_path / "shots.pdf"
+        write_screenshots_pdf(build_document(project), target)
+        sizes, _titles, text = _pdf_pages_and_bookmarks(target)
+        assert len(sizes) == 3
+        # No title, no captions, no page numbers: the page is the picture.
+        assert text.strip() == ""
+
+    def test_each_page_is_the_shape_of_its_picture(self, project, tmp_path):
+        capture = _add(project, 5.0)
+        _add(project, 6.0)
+        # A 4:3 frame next to the 16:9 one.
+        _wide_jpeg(project.root / capture.image, 640, 480)
+        target = tmp_path / "shots.pdf"
+        write_screenshots_pdf(build_document(project), target)
+        sizes, _titles, _text = _pdf_pages_and_bookmarks(target)
+        assert sizes == [pytest.approx((960.0, 720.0)), pytest.approx((960.0, 540.0))]
+
+    def test_the_picture_fills_its_page_untouched(self, project, tmp_path):
+        _add(project, 5.0)
+        target = tmp_path / "shots.pdf"
+        write_screenshots_pdf(build_document(project), target)
+        # No margin anywhere: every corner of the page is the picture's colour
+        # (the test pictures are a flat (40, 120, 160)), none is paper.
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QColor
+        from PySide6.QtPdf import QPdfDocument
+
+        pdf = QPdfDocument()
+        pdf.load(str(target))
+        page = pdf.render(0, QSize(480, 270))
+        pdf.close()
+        for x, y in ((0, 0), (479, 0), (0, 269), (479, 269)):
+            corner = QColor(page.pixel(x, y))
+            assert abs(corner.red() - 40) < 12 and abs(corner.blue() - 160) < 12, (x, y)
+        data = target.read_bytes()
+        # The JPEG itself, not re-encoded and not spelled out in ASCII.
+        assert b"/DCTDecode" in data and b"/ASCII85Decode" not in data
+
+    def test_time_slide_and_marking_are_bookmarks(self, project, tmp_path):
         _add(project, 6.0, marks=[Mark.memo(0.1, 0.1, "exam")], start=4.0)
         _add(project, 50.0)
         target = tmp_path / "shots.pdf"
         write_screenshots_pdf(build_document(project), target)
-        text = _pdf_text(target)
-        assert "머신러닝 1주차" in text and "2 screenshots" in text
-        assert "1 · 00:00:06 · Slide 1 · marked from 00:00:04" in text
-        assert "2 · 00:00:50 · Slide 2" in text
-        assert text.index("00:00:06") < text.index("00:00:50")
-        # Nothing of the notes.
-        assert "learning rate" not in text and "Transcript" not in text
-
-    def test_two_to_a_page(self, project, tmp_path):
-        for second in (5.0, 10.0, 40.0, 50.0, 55.0):
-            _add(project, second)
-        target = tmp_path / "shots.pdf"
-        write_screenshots_pdf(build_document(project), target)
-        pages = _pdf_pages(target)
-        assert len(pages) == 3
-        assert [page.count(" · 00:00:") for page in pages] == [2, 2, 1]
+        _sizes, titles, _text = _pdf_pages_and_bookmarks(target)
+        assert titles == [
+            "1  ·  00:00:06  ·  Slide 1  ·  marked from 00:00:04",
+            "2  ·  00:00:50  ·  Slide 2",
+        ]
 
     def test_every_picture_is_printed_with_its_marks(self, project, tmp_path):
         marked = _add(project, 6.0, marks=[Mark.underline(0, 0.5, 1, 0.5)])
@@ -251,5 +308,13 @@ class TestScreenshotsPdf:
         assert result.ok, result.failures
         (written,) = result.written
         assert written.name == f"{safe_file_stem(project.name)}_screenshots.pdf"
-        text = _pdf_text(written)
-        assert "1 · 00:00:05" in text and "Slide" not in text
+        _sizes, titles, _text = _pdf_pages_and_bookmarks(written)
+        assert titles == ["1  ·  00:00:05"]
+
+    def test_the_notes_pdf_still_uses_a4(self, project, tmp_path):
+        # Only the screenshots PDF changed its pages.
+        _add(project, 5.0)
+        target = tmp_path / "notes.pdf"
+        write_pdf(build_document(project), PdfOptions(), target)
+        sizes, _titles, _text = _pdf_pages_and_bookmarks(target)
+        assert sizes[0] == pytest.approx((595.27, 841.89), abs=0.5)

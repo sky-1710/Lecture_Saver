@@ -126,8 +126,8 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    to keep the picture on screen with your marks. *Screenshots* opens them
    beside the video: change any screenshot's marks there, and *Play from*
    replays the stretch you were marking. *Export PDF* at the top of the panel
-   (or **File → Export screenshots PDF**) puts them all in one PDF to print,
-   two to a page. You need not remember the keys: they are written under the
+   (or **File → Export screenshots PDF**) puts them all in one PDF, each page
+   just the screenshot, edge to edge. You need not remember the keys: they are written under the
    video's buttons - the drawing tools' while you draw - and under the
    screenshot being edited.
 6. **Correct the transcript.** Double-click a line to fix it; right-click for
@@ -412,10 +412,13 @@ to one language for the whole recording.
   and the line too. *Delete...* asks first
 - **Screenshots PDF** - *Export PDF* in the panel, **File → Export
   screenshots PDF**, or *Screenshots PDF* in *More formats...*: only the
-  screenshots, in the order of the lecture, with their marks, two to a page at
-  the full page width. Above each: its number, time, slide and where its
-  marking began. Written as `<lecture>_screenshots.pdf` to the same folder as
-  the other exports; it needs neither slides nor a transcript
+  screenshots, in the order of the lecture, with their marks - one per page,
+  each page the shape of its picture and filled by it, without margins,
+  titles or captions. Pages are 13.33 in wide like a widescreen slide, so a
+  16:9 lecture prints as slides do, and the pictures go in as taken, not
+  re-compressed. Each page's number, time, slide and where its marking began
+  are the PDF's bookmarks. Written as `<lecture>_screenshots.pdf` to the same
+  folder as the other exports; it needs neither slides nor a transcript
 - They stay out of the notes PDF unless *My screenshots in the notes too* is
   ticked in *More formats...*; then each sits in the transcript after the
   paragraph being spoken when it was taken. Each screenshot is also kept as

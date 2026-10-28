@@ -191,7 +191,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._quick_export_action)
         self._screenshots_export_action = QAction("Export s&creenshots PDF", self)
         self._screenshots_export_action.setToolTip(
-            "Every screenshot with its marks in one PDF, two to a page."
+            "Every screenshot with its marks in one PDF, a page each, edge to edge."
         )
         self._screenshots_export_action.setEnabled(False)
         file_menu.addAction(self._screenshots_export_action)

@@ -435,8 +435,9 @@ class CapturePanel(QFrame):
         self._export_button = QToolButton()
         self._export_button.setText("Export PDF")
         self._export_button.setToolTip(
-            "Save every screenshot, with its marks, in one PDF to print - two to a "
-            "page, in the order of the lecture, each with its time and slide."
+            "Save every screenshot, with its marks, as one PDF: each page is one "
+            "screenshot and nothing else, edge to edge, in the order of the lecture.\n"
+            "Each one's time and slide are in the PDF's bookmarks."
         )
         self._hide_button = QToolButton()
         self._hide_button.setText("✕")
