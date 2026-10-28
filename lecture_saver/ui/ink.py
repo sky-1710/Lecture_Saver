@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -122,6 +123,14 @@ MEMO_TEXT_COLOUR = PEN_COLOUR
 #: Sizes, as fractions of the picture's height (width for the memo's wrap).
 UNDERLINE_WIDTH = 0.0045
 MEMO_TEXT_SIZE = 0.033
+#: The memo text sizes the size button offers, as fractions of the picture's
+#: height. Medium is the default, and the size of every memo from before.
+TEXT_SIZES = (
+    ("Small", 0.024),
+    ("Medium", MEMO_TEXT_SIZE),
+    ("Large", 0.046),
+    ("Extra large", 0.064),
+)
 MEMO_MAX_WIDTH = 0.42
 #: A highlight dragged flatter than this many pixels marks a line of text.
 LINE_HIGHLIGHT_BELOW_PX = 7
@@ -177,13 +186,20 @@ def stored_ink(ink: str) -> str:
     return "" if ink == DEFAULT_INK else ink
 
 
+def stored_size(size: float) -> float:
+    """How a text size is kept on a memo: the default is left unsaid."""
+    return 0.0 if abs(size - MEMO_TEXT_SIZE) < 1e-9 else size
+
+
 def underline_width(rect: QRectF) -> float:
     return max(2.0, rect.height() * UNDERLINE_WIDTH)
 
 
-def memo_font(rect: QRectF) -> QFont:
+def memo_font(rect: QRectF, size: float = 0.0) -> QFont:
+    """The memo font for a picture in ``rect``: ``size`` of its height, or the
+    default size when ``size`` is 0."""
     font = QFont()
-    font.setPixelSize(max(9, round(rect.height() * MEMO_TEXT_SIZE)))
+    font.setPixelSize(max(9, round(rect.height() * (size or MEMO_TEXT_SIZE))))
     # Without a box behind it, a little weight keeps it readable on video.
     font.setWeight(QFont.Weight.DemiBold)
     return font
@@ -195,7 +211,7 @@ def _memo_padding(font: QFont) -> float:
 
 def memo_box(mark: Mark, rect: QRectF) -> QRectF:
     """Where a memo's note is drawn: its text wrapped, kept inside the picture."""
-    font = memo_font(rect)
+    font = memo_font(rect, mark.size)
     pad = _memo_padding(font)
     wrap = max(rect.width() * MEMO_MAX_WIDTH, font.pixelSize() * 5.0)
     text = QFontMetricsF(font).boundingRect(
@@ -271,7 +287,6 @@ def paint_marks(painter: QPainter, marks: Sequence[Mark], rect: QRectF, *,
     painter.setClipRect(rect)
     line = QPen(UNDERLINE_COLOUR, underline_width(rect))
     line.setCapStyle(Qt.PenCapStyle.RoundCap)
-    font = memo_font(rect)
     for index in paint_order(marks):
         if index == skip:
             continue
@@ -291,7 +306,7 @@ def paint_marks(painter: QPainter, marks: Sequence[Mark], rect: QRectF, *,
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(stroke_path([to_pixels(x, y, rect) for x, y in mark.points]))
         elif mark.kind == MEMO:
-            _paint_memo(painter, mark, rect, font)
+            _paint_memo(painter, mark, rect)
     painter.restore()
 
 
@@ -316,7 +331,8 @@ def stroke_path(points: Sequence[QPointF]) -> QPainterPath:
     return path
 
 
-def _paint_memo(painter: QPainter, mark: Mark, rect: QRectF, font: QFont) -> None:
+def _paint_memo(painter: QPainter, mark: Mark, rect: QRectF) -> None:
+    font = memo_font(rect, mark.size)
     # The box only places and wraps the text, and is what a click hits.
     box = memo_box(mark, rect)
     pad = _memo_padding(font)
@@ -416,6 +432,28 @@ def ink_icon(ink: str) -> QIcon:
     return QIcon(pixmap)
 
 
+def size_icon() -> QIcon:
+    """A small "A" beside a large one: text size."""
+    scale = 2
+    pixmap = QPixmap(ICON_SIZE * scale, ICON_SIZE * scale)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    painter.setPen(QColor(theme.MUTED))
+    font = QFont()
+    font.setWeight(QFont.Weight.Bold)
+    font.setPixelSize(8)
+    painter.setFont(font)
+    painter.drawText(QRectF(1, 6, 8, 12), int(Qt.AlignmentFlag.AlignBottom), "A")
+    font.setPixelSize(15)
+    painter.setFont(font)
+    painter.drawText(QRectF(7, 1, 13, 17), int(Qt.AlignmentFlag.AlignBottom), "A")
+    painter.end()
+    return QIcon(pixmap)
+
+
 def draw_icon() -> QIcon:
     """The pen, for the button that turns drawing over the video on."""
     return tool_icon(TOOL_PEN)
@@ -496,6 +534,8 @@ class InkCanvas(QWidget):
     toolChanged = Signal(str)
     #: The ink new marks are drawn in changed; carries ``#rrggbb``.
     inkChanged = Signal(str)
+    #: The size new memos are typed in changed; carries the fraction.
+    textSizeChanged = Signal(float)
     #: Esc with nothing in progress - the place to leave drawing.
     escapePressed = Signal()
 
@@ -506,6 +546,9 @@ class InkCanvas(QWidget):
         self._ink = DEFAULT_INK
         #: The ink of the memo being typed: its own when an old one is changed.
         self._memo_ink = DEFAULT_INK
+        self._text_size = MEMO_TEXT_SIZE
+        #: The size of the memo being typed: its own when an old one is changed.
+        self._memo_size = MEMO_TEXT_SIZE
         self._editable = True
         self._drag_from: QPointF | None = None
         #: The pen stroke being drawn, in pixels on screen.
@@ -610,6 +653,22 @@ class InkCanvas(QWidget):
             self._memo_ink = ink
             self._style_memo_editor()
         self.inkChanged.emit(ink)
+
+    @property
+    def text_size(self) -> float:
+        return self._text_size
+
+    def set_text_size(self, size: float) -> None:
+        """Type new memos at ``size`` of the picture's height. A memo being
+        typed takes it too."""
+        if abs(size - self._text_size) < 1e-9:
+            return
+        self._text_size = size
+        if self._memo_editor is not None:
+            self._memo_size = size
+            self._style_memo_editor()
+            self._place_memo_editor()
+        self.textSizeChanged.emit(size)
 
     @property
     def editable(self) -> bool:
@@ -828,11 +887,13 @@ class InkCanvas(QWidget):
         self._memo_at = (x, y)
         self._memo_index = index
         marks = self._sheet.marks
-        self._memo_ink = (
-            ink_of(marks[index]).name() if 0 <= index < len(marks) else self._ink
+        existing = marks[index] if 0 <= index < len(marks) else None
+        self._memo_ink = ink_of(existing).name() if existing is not None else self._ink
+        self._memo_size = (
+            (existing.size or MEMO_TEXT_SIZE) if existing is not None else self._text_size
         )
         editor = _MemoEditor(self)
-        editor.setFont(memo_font(rect))
+        editor.setFont(memo_font(rect, self._memo_size))
         editor.setPlaceholderText("Type a memo, Enter to keep it")
         editor.setText(text)
         editor.committed.connect(self.commit_memo)
@@ -852,7 +913,7 @@ class InkCanvas(QWidget):
         rect = self.picture_rect()
         if editor is None or rect.isEmpty():
             return
-        font = memo_font(rect)
+        font = memo_font(rect, self._memo_size)
         pad = round(_memo_padding(font))
         editor.setStyleSheet(
             f"QLineEdit, QLineEdit:focus {{ background: transparent; border: none;"
@@ -865,7 +926,7 @@ class InkCanvas(QWidget):
         rect = self.picture_rect()
         if editor is None or rect.isEmpty():
             return
-        editor.setFont(memo_font(rect))
+        editor.setFont(memo_font(rect, self._memo_size))
         width = int(max(rect.width() * MEMO_MAX_WIDTH, 150))
         height = editor.sizeHint().height()
         point = to_pixels(*self._memo_at, rect)
@@ -886,7 +947,8 @@ class InkCanvas(QWidget):
                 return
             if text:
                 existing = self._sheet.marks[index]
-                changed = replace(existing, text=text, colour=stored_ink(self._memo_ink))
+                changed = replace(existing, text=text, colour=stored_ink(self._memo_ink),
+                                  size=stored_size(self._memo_size))
                 if changed != existing:
                     self._sheet.replace(index, changed)
                     self._changed(True)
@@ -894,7 +956,8 @@ class InkCanvas(QWidget):
                 self._sheet.remove(index)
                 self._changed(True)
         elif text:
-            self._sheet.add(Mark.memo(*self._memo_at, text, stored_ink(self._memo_ink)))
+            self._sheet.add(Mark.memo(*self._memo_at, text, stored_ink(self._memo_ink),
+                                      stored_size(self._memo_size)))
             self._changed(True, added=True)
 
     def cancel_memo(self) -> None:
@@ -986,8 +1049,10 @@ class InkToolBar(QWidget):
     its arrow chooses another, and it shows the one in use.
     """
 
-    def __init__(self, canvas: InkCanvas, *, keys: bool = False,
+    def __init__(self, canvas: InkCanvas, *, keys: bool = False, two_rows: bool = False,
                  parent: QWidget | None = None) -> None:
+        """``two_rows`` puts undo, redo and *Clear all* under the tools, for a
+        narrow pane: in one row they need about 340 px."""
         super().__init__(parent)
         self._canvas = canvas
         self._keys = keys
@@ -1042,6 +1107,27 @@ class InkToolBar(QWidget):
             "Marks already drawn keep theirs; highlights stay yellow."
         )
 
+        self._size_menu = QMenu(self)
+        sizes = QActionGroup(self)
+        sizes.setExclusive(True)
+        self._size_actions: dict[str, QAction] = {}
+        for name, size in TEXT_SIZES:
+            action = QAction(name, self._size_menu)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _=False, z=size: canvas.set_text_size(z))
+            sizes.addAction(action)
+            self._size_menu.addAction(action)
+            self._size_actions[name] = action
+        self._size_button = QToolButton()
+        self._size_button.setIcon(size_icon())
+        self._size_button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+        self._size_button.setMenu(self._size_menu)
+        self._size_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._size_button.setToolTip(
+            "Size of memo text. Memos already typed keep theirs - double-click one "
+            "and choose a size to change it."
+        )
+
         self._undo_button = QToolButton()
         self._undo_button.setIcon(history_icon(redo=False))
         self._undo_button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
@@ -1056,26 +1142,41 @@ class InkToolBar(QWidget):
         self._clear_button.setText("Clear all")
         self._clear_button.setToolTip("Remove every mark. Undo brings them back.")
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(self._pen_button)
-        layout.addWidget(self._memo_button)
-        layout.addWidget(self._ink_button)
-        layout.addSpacing(6)
+        tools = QHBoxLayout()
+        tools.setContentsMargins(0, 0, 0, 0)
+        tools.setSpacing(2)
+        for button in (self._pen_button, self._memo_button, self._ink_button,
+                       self._size_button):
+            tools.addWidget(button)
+        history = tools if not two_rows else QHBoxLayout()
+        history.setContentsMargins(0, 0, 0, 0)
+        history.setSpacing(2)
+        if not two_rows:
+            tools.addSpacing(6)
         for button in (self._undo_button, self._redo_button, self._clear_button):
-            layout.addWidget(button)
-        layout.addStretch(1)
+            history.addWidget(button)
+        history.addStretch(1)
+        if two_rows:
+            tools.addStretch(1)
+            rows = QVBoxLayout(self)
+            rows.setContentsMargins(0, 0, 0, 0)
+            rows.setSpacing(2)
+            rows.addLayout(tools)
+            rows.addLayout(history)
+        else:
+            self.setLayout(tools)
 
         self._undo_button.clicked.connect(canvas.undo)
         self._redo_button.clicked.connect(canvas.redo)
         self._clear_button.clicked.connect(canvas.clear_marks)
         canvas.toolChanged.connect(self._show_tool)
         canvas.inkChanged.connect(self._show_ink)
+        canvas.textSizeChanged.connect(self._show_text_size)
         canvas.marksChanged.connect(self.refresh)
         canvas.marksLoaded.connect(self.refresh)
         self._show_tool(canvas.tool)
         self._show_ink(canvas.ink)
+        self._show_text_size(canvas.text_size)
         self.refresh()
 
     @staticmethod
@@ -1111,6 +1212,20 @@ class InkToolBar(QWidget):
 
     def ink_action(self, ink: str) -> QAction:
         return self._ink_actions[ink]
+
+    @property
+    def size_button(self) -> QToolButton:
+        return self._size_button
+
+    def size_action(self, name: str) -> QAction:
+        return self._size_actions[name]
+
+    def _show_text_size(self, size: float) -> None:
+        name = next((n for n, z in TEXT_SIZES if abs(z - size) < 1e-9), "")
+        action = self._size_actions.get(name)
+        if action is not None:
+            action.setChecked(True)
+        self._size_button.setAccessibleName(f"Text size: {name}" if name else "Text size")
 
     def _show_ink(self, ink: str) -> None:
         self._ink_button.setIcon(ink_icon(ink))

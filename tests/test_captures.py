@@ -75,6 +75,22 @@ class TestMark:
         data = {"kind": "memo", "x": 0.1, "y": 0.1, "text": "x", "colour": colour}
         assert Mark.from_dict(data).colour == ""
 
+    def test_a_memo_keeps_its_text_size(self):
+        memo = Mark.memo(0.1, 0.1, "big", size=0.064)
+        assert Mark.from_dict(memo.to_dict()) == memo
+        assert memo.to_dict()["size"] == 0.064
+        assert memo.with_text("bigger").size == 0.064
+
+    def test_the_default_text_size_is_left_unsaid(self):
+        assert "size" not in Mark.memo(0.1, 0.1, "x").to_dict()
+        old = {"kind": "memo", "x": 0.1, "y": 0.1, "text": "from before"}
+        assert Mark.from_dict(old).size == 0.0
+
+    @pytest.mark.parametrize("size", [0.0, -1, 2.0, "large", True])
+    def test_what_is_not_a_text_size_is_the_default(self, size):
+        data = {"kind": "memo", "x": 0.1, "y": 0.1, "text": "x", "size": size}
+        assert Mark.from_dict(data).size == 0.0
+
     def test_changing_a_memo_keeps_its_colour(self):
         memo = Mark.memo(0.1, 0.1, "draft", "#7b3fc4")
         assert memo.with_text("final").colour == "#7b3fc4"

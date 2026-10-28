@@ -79,6 +79,13 @@ def _colour(value: object) -> str:
     return value.lower() if isinstance(value, str) and _HEX_COLOUR.fullmatch(value) else ""
 
 
+def _text_size(value: object) -> float:
+    """A memo's text height as a fraction of the picture's, or 0 - the default."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return 0.0
+    return float(value) if 0.005 <= value <= 0.25 else 0.0
+
+
 def _number(value: object, default: float = 0.0) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
@@ -107,6 +114,9 @@ class Mark:
     #: The ink, as ``#rrggbb``; "" is the default red - and what every mark
     #: drawn before colours could be chosen has. Highlights are always yellow.
     colour: str = ""
+    #: A memo's text height as a fraction of the picture's; 0 is the default
+    #: size, and what memos from before sizes could be chosen have.
+    size: float = 0.0
 
     @classmethod
     def pen(cls, points: Iterable[Point], colour: str = "") -> Mark:
@@ -130,9 +140,12 @@ class Mark:
         return cls(HIGHLIGHT, left, top, right, bottom)
 
     @classmethod
-    def memo(cls, x: float, y: float, text: str, colour: str = "") -> Mark:
+    def memo(
+        cls, x: float, y: float, text: str, colour: str = "", size: float = 0.0
+    ) -> Mark:
         left, top, _, _ = _clamped(x, y, x, y)
-        return cls(MEMO, left, top, left, top, text, colour=_colour(colour))
+        return cls(MEMO, left, top, left, top, text, colour=_colour(colour),
+                   size=_text_size(size))
 
     def with_text(self, text: str) -> Mark:
         return replace(self, text=text)
@@ -145,6 +158,8 @@ class Mark:
         elif self.kind == MEMO:
             data = {"kind": MEMO, "x": round(self.x1, 5), "y": round(self.y1, 5),
                     "text": self.text}
+            if self.size:
+                data["size"] = round(self.size, 4)
         else:
             data = {
                 "kind": self.kind,
@@ -180,7 +195,7 @@ class Mark:
             text = data.get("text")
             if x is None or y is None or not isinstance(text, str) or not text.strip():
                 return None
-            return cls.memo(x, y, text, colour)
+            return cls.memo(x, y, text, colour, _text_size(data.get("size")))
         if kind not in (UNDERLINE, HIGHLIGHT):
             return None
         corners = [_unit(data.get(key)) for key in ("x1", "y1", "x2", "y2")]

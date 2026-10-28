@@ -121,7 +121,8 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    **underline**, **highlight** and an **eraser** (keys 1-4; its arrow picks
    one), and beside it is a typed **memo** (5) - double-click one to change
    it later. The dot beside them picks the **ink**: red, blue, black, green,
-   orange, purple or white. Press **S** (or *Screenshot*)
+   orange, purple or white; the **A** beside it the memo **text size**. Press
+   **S** (or *Screenshot*)
    to keep the picture on screen with your marks. *Screenshots* opens them
    beside the video: change any screenshot's marks there, and *Play from*
    replays the stretch you were marking. *Export PDF* at the top of the panel
@@ -393,6 +394,10 @@ to one language for the whole recording.
   and memos - red, blue, black, green, orange, purple or white (for dark
   slides). Each mark keeps its own; changing the ink while typing a memo
   recolours that memo. Highlights stay yellow
+- **Text size**: the **A** after the ink sets the size of new memos - small,
+  medium (the default), large or extra large, in proportion to the picture so
+  a memo keeps its size on the panel's small view and in the PDF. Each memo
+  keeps its own; choose a size while typing or changing one to resize it
 - **Screenshot** (S) keeps the frame on screen at the video's full resolution,
   with the marks that are showing. Saving happens in the background - about
   13 ms of the interface's time - so taking one at 2x does not stutter

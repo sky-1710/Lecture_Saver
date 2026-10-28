@@ -488,7 +488,7 @@ class CapturePanel(QFrame):
 
         self._canvas = CaptureCanvas()
         self._canvas.setMinimumHeight(140)
-        self._tools = InkToolBar(self._canvas)
+        self._tools = InkToolBar(self._canvas, two_rows=True)
         self._play_button = QPushButton("Play")
         set_flag(self._play_button, "accent")
         self._play_button.setToolTip(

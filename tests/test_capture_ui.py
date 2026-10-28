@@ -401,6 +401,60 @@ class TestInk:
         assert colour.blue() > 150 and colour.red() < 100
 
 
+class TestTextSize:
+    LARGE = dict(ink.TEXT_SIZES)["Large"]
+
+    def _type_memo(self, canvas, point, text):
+        canvas.set_tool(ink.TOOL_MEMO)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=point)
+        canvas._memo_editor.setText(text)
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+
+    def test_medium_to_start_with_and_stored_as_the_default(self, canvas):
+        assert canvas.text_size == ink.MEMO_TEXT_SIZE
+        self._type_memo(canvas, QPoint(400, 90), "normal")
+        assert canvas.marks[0].size == 0.0
+
+    def test_new_memos_are_typed_in_the_size_chosen(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        bar.size_action("Large").trigger()
+        assert canvas.text_size == self.LARGE
+        self._type_memo(canvas, QPoint(400, 90), "big")
+        assert canvas.marks[0].size == self.LARGE
+        assert bar.size_button.accessibleName() == "Text size: Large"
+
+    def test_a_larger_memo_takes_more_room(self, canvas):
+        rect = canvas.picture_rect()
+        small = ink.memo_box(Mark.memo(0.1, 0.1, "same words", size=0.024), rect)
+        large = ink.memo_box(Mark.memo(0.1, 0.1, "same words", size=0.064), rect)
+        assert large.height() > small.height() * 2
+        assert large.width() > small.width() * 2
+
+    def test_a_memo_changed_keeps_its_size(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "big", size=self.LARGE)])
+        canvas.set_text_size(dict(ink.TEXT_SIZES)["Small"])
+        QTest.mouseDClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(410, 100))
+        canvas._memo_editor.setText("still big")
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert canvas.marks[0].size == self.LARGE
+
+    def test_choosing_a_size_while_typing_resizes_that_memo(self, canvas):
+        canvas.set_tool(ink.TOOL_MEMO)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(400, 90))
+        canvas._memo_editor.setText("growing")
+        before = canvas._memo_editor.height()
+        canvas.set_text_size(self.LARGE)
+        assert canvas._memo_editor.height() > before
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert canvas.marks[0].size == self.LARGE
+
+    def test_the_menu_offers_four_sizes(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        names = [a.text() for a in bar.size_button.menu().actions()]
+        assert names == ["Small", "Medium", "Large", "Extra large"]
+        assert bar.size_action("Medium").isChecked()
+
+
 class TestRendering:
     def test_marks_are_drawn_into_a_full_size_copy(self, qapp):
         image = picture(320, 180)
