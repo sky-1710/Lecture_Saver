@@ -14,6 +14,9 @@ fail on broken wiring, never on a colour.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from html import escape
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QBrush,
@@ -42,6 +45,7 @@ __all__ = [
     "app_icon",
     "apply_theme",
     "set_flag",
+    "key_hints",
     "set_role",
     "stylesheet",
 ]
@@ -120,6 +124,23 @@ def set_flag(widget: QWidget, name: str, value: object = True) -> None:
     """Set a style property the stylesheet selects on - ``card``, ``banner``."""
     widget.setProperty(name, value)
     repolish(widget)
+
+
+def key_hints(keys: Sequence[tuple[str, str]]) -> str:
+    """``[("D", "draw"), ...]`` as one line of rich text: each key picked out
+    in the text colour, what it does in the label's own (muted) colour.
+
+    A narrow pane wraps the line between entries only, never inside a key or
+    between a key and what it does.
+    """
+
+    def unbroken(text: str) -> str:
+        return escape(text).replace(" ", "&nbsp;")
+
+    return "&nbsp;&nbsp;·&nbsp; ".join(
+        f'<b style="color:{TEXT};">{unbroken(key)}</b>&nbsp;{unbroken(what)}'
+        for key, what in keys
+    )
 
 
 def repolish(widget: QWidget) -> None:

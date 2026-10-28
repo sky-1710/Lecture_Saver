@@ -112,7 +112,9 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    repeats that at any time, and Ctrl+Z undoes it.
 5. **Navigate.** Click any transcript segment or slide thumbnail to jump the
    video there. As the video plays, the matching transcript segment is
-   highlighted and scrolled into view.
+   highlighted and scrolled into view. **←** and **→** move the video a
+   second back or forward from anywhere but a text box; held down, they keep
+   going.
    **Draw and take screenshots while you watch.** Press **D** (or *Draw* under
    the video) and mark the picture as it keeps playing - at any speed, 2x
    included; Space still pauses. The pen button holds a **free pen**,
@@ -122,7 +124,9 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    beside the video: change any screenshot's marks there, and *Play from*
    replays the stretch you were marking. *Export PDF* at the top of the panel
    (or **File → Export screenshots PDF**) puts them all in one PDF to print,
-   two to a page.
+   two to a page. You need not remember the keys: they are written under the
+   video's buttons - the drawing tools' while you draw - and under the
+   screenshot being edited.
 6. **Correct the transcript.** Double-click a line to fix it; right-click for
    merge, add, delete and restore original; Ctrl+F to find and replace a
    repeated mistake. Edits save themselves.

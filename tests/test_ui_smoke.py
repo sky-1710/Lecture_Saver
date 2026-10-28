@@ -1973,6 +1973,165 @@ class TestSpaceKey:
         assert calls == []
 
 
+class TestArrowKeys:
+    """Left and Right move the video a second, and keep it moving while held.
+
+    The media player's position is pinned and its seeks recorded; each seek's
+    frame "arrives" at once unless a test says otherwise. Whether the key is
+    still down is asked of the keyboard, so tests say that too - the real
+    keyboard is not being pressed.
+    """
+
+    @pytest.fixture
+    def held(self, monkeypatch):
+        import lecture_saver.ui.video_player as video_player
+
+        state = {"down": False}
+        monkeypatch.setattr(video_player, "key_is_down", lambda key: state["down"])
+        return state
+
+    @pytest.fixture
+    def seeks(self, editing_view, monkeypatch, held):
+        player = editing_view._player
+        media = player._player
+        seeks: list[float] = []
+
+        def seek(ms):
+            seeks.append(ms / 1000)
+            if player.frames_land:
+                player._awaiting_frame = False
+
+        player.frames_land = True
+        monkeypatch.setattr(media, "setPosition", seek)
+        monkeypatch.setattr(media, "position", lambda: 30_000)
+        # The 2 s test video finishing loading must not shorten the pinned 600 s.
+        media.durationChanged.disconnect(player._on_duration)
+        monkeypatch.setattr(player, "_duration_s", 600.0)
+        editing_view.activateWindow()
+        QApplication.processEvents()
+        return seeks
+
+    @staticmethod
+    def _wait(seconds):
+        import time
+
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            QApplication.processEvents()
+            time.sleep(0.005)
+
+    def _hold(self, widget, key, held, seconds):
+        """Press ``key``, keep it down for ``seconds``, let it go."""
+        from PySide6.QtTest import QTest
+
+        widget.setFocus()
+        QApplication.processEvents()
+        held["down"] = True
+        QTest.keyPress(widget, key)
+        self._wait(seconds)
+        held["down"] = False
+        QTest.keyRelease(widget, key)
+        QApplication.processEvents()
+
+    def _press(self, widget, key, times=1):
+        from PySide6.QtTest import QTest
+
+        widget.setFocus()
+        QApplication.processEvents()
+        for _ in range(times):
+            QTest.keyClick(widget, key)
+        QApplication.processEvents()
+
+    def test_right_and_left_move_a_second(self, editing_view, seeks, monkeypatch):
+        import lecture_saver.ui.video_player as video_player
+
+        self._press(editing_view._transcript, Qt.Key.Key_Right)
+        # Far enough apart not to be one held key.
+        monkeypatch.setattr(video_player.time, "monotonic", lambda: 10_000.0)
+        self._press(editing_view._transcript, Qt.Key.Key_Left)
+        assert seeks == [31.0, 29.0]
+
+    def test_quick_presses_go_on_from_the_last_step(self, editing_view, seeks):
+        # The position still says 30 s: each press goes on from the last step.
+        self._press(editing_view._slides_pane._list, Qt.Key.Key_Right, times=4)
+        assert seeks == [31.0, 32.0, 33.0, 34.0]
+
+    def test_held_down_it_keeps_moving_until_let_go(self, editing_view, seeks, held):
+        import lecture_saver.ui.video_player as video_player
+
+        self._hold(editing_view._transcript, Qt.Key.Key_Right, held, 1.0)
+        # One step at once, then a second every HOLD_INTERVAL_MS after the delay.
+        expected = 1 + (1000 - video_player.HOLD_DELAY_MS) // video_player.HOLD_INTERVAL_MS
+        assert len(seeks) >= expected - 1
+        assert seeks == [31.0 + i for i in range(len(seeks))]
+        player = editing_view._player
+        assert not player.is_holding
+        moved = len(seeks)
+        self._wait(0.5)
+        assert len(seeks) == moved, "the video kept moving after the key came up"
+
+    def test_held_left_goes_back(self, editing_view, seeks, held):
+        self._hold(editing_view._transcript, Qt.Key.Key_Left, held, 0.7)
+        assert seeks[:3] == [29.0, 28.0, 27.0]
+
+    def test_a_quick_press_is_one_step(self, editing_view, seeks, held):
+        self._hold(editing_view._transcript, Qt.Key.Key_Right, held, 0.1)
+        assert seeks == [31.0]
+
+    def test_it_waits_for_each_picture_but_keeps_its_pace(self, editing_view, seeks, held):
+        # Frames never come: one seek, then none until the wait for it runs out,
+        # while the target keeps going - and is sent when the key comes up.
+        editing_view._player.frames_land = False
+        self._hold(editing_view._transcript, Qt.Key.Key_Right, held, 0.9)
+        assert seeks[0] == 31.0 and seeks[1] == 32.0
+        assert len(seeks) == 3
+        assert seeks[-1] > 34.0
+
+    def test_a_key_let_go_unseen_still_stops_it(self, editing_view, seeks, held):
+        from PySide6.QtTest import QTest
+
+        widget = editing_view._transcript
+        widget.setFocus()
+        held["down"] = True
+        QTest.keyPress(widget, Qt.Key.Key_Right)
+        self._wait(0.6)
+        held["down"] = False  # its release went to another window
+        self._wait(0.4)
+        assert not editing_view._player.is_holding
+        moved = len(seeks)
+        self._wait(0.4)
+        assert len(seeks) == moved
+
+    def test_held_in_a_text_box_it_is_the_cursor(self, editing_view, seeks, held):
+        editor = _open_editor(editing_view, "segment_001")
+        self._hold(editor, Qt.Key.Key_Right, held, 0.7)
+        assert seeks == []
+        assert not editing_view._player.is_holding
+
+    def test_never_before_the_start_or_past_the_end(self, editing_view, seeks, monkeypatch):
+        media = editing_view._player._player
+        monkeypatch.setattr(media, "position", lambda: 500)
+        self._press(editing_view._transcript, Qt.Key.Key_Left)
+        monkeypatch.setattr(media, "position", lambda: 599_800)
+        editing_view._player._step_target = None
+        self._press(editing_view._transcript, Qt.Key.Key_Right)
+        assert seeks == [0.0, 600.0]
+
+    def test_in_a_text_box_the_arrows_move_the_cursor(self, editing_view, seeks):
+        editor = _open_editor(editing_view, "segment_001")
+        editor.setFocus()
+        self._press(editor, Qt.Key.Key_Left, times=2)
+        assert seeks == []
+
+    def test_the_keys_are_written_under_the_video(self, editing_view):
+        assert "1&nbsp;s&nbsp;back&nbsp;/&nbsp;forward" in editing_view._player.keys_text
+
+    def test_nothing_without_a_video(self, editing_view, seeks):
+        editing_view._player.clear()
+        self._press(editing_view._transcript, Qt.Key.Key_Right)
+        assert seeks == []
+
+
 class TestAskAI:
     """Ask AI from the lecture: a line's button, the panel, and the way back.
 

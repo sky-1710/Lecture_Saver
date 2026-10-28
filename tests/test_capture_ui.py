@@ -58,6 +58,13 @@ def show(player, frame: QVideoFrame) -> None:
     player.video_sink.setVideoFrame(frame)
 
 
+def watching_keys(player) -> str:
+    from lecture_saver.ui.theme import key_hints
+    from lecture_saver.ui.video_player import WATCHING_KEYS
+
+    return key_hints(WATCHING_KEYS)
+
+
 def drag(widget, start: QPoint, end: QPoint, button=Qt.MouseButton.LeftButton) -> None:
     QTest.mousePress(widget, button, Qt.KeyboardModifier.NoModifier, start)
     QTest.mouseMove(widget, end)
@@ -474,6 +481,28 @@ class TestPlayerDrawing:
         drag(player.canvas, QPoint(200, 200), QPoint(500, 200))
         assert player.take_screenshot().start == pytest.approx(35.0)
 
+    def test_the_keys_are_written_under_the_buttons(self, player):
+        assert player._keys_label.isVisible()
+        watching = player.keys_text
+        for key, what in (("Space", "play / pause"), ("D", "draw"), ("S", "screenshot")):
+            assert f">{key}</b>&nbsp;{what}".replace(" ", "&nbsp;") in watching
+
+    def test_while_drawing_the_keys_are_the_tools(self, player):
+        player.set_drawing(True)
+        drawing = player.keys_text
+        for key, what in (("1", "free pen"), ("2", "underline"), ("3", "highlight"),
+                          ("4", "eraser"), ("5", "memo"), ("Ctrl+Z", "undo"),
+                          ("D / Esc", "stop drawing")):
+            assert f">{key}</b>&nbsp;{what}".replace(" ", "&nbsp;") in drawing
+        player.set_drawing(False)
+        assert player.keys_text == watching_keys(player)
+
+    def test_without_a_video_no_keys_are_promised(self, qapp):
+        view = VideoPlayer()
+        view.show()
+        QApplication.processEvents()
+        assert not view._keys_label.isVisible()
+
     def test_esc_on_the_canvas_leaves_drawing(self, player):
         player.set_drawing(True)
         player.canvas.setFocus()
@@ -668,6 +697,12 @@ class TestCapturePanel:
         panel.bind(None)
         panel.bind(Project.open(project.root))
         assert (project.root / capture.marked_image).is_file()
+
+    def test_the_panel_says_its_keys(self, panel):
+        panel.add_screenshot(shot(1.0))
+        assert panel._keys_label.isVisible()
+        for key in ("Ctrl+Z", "Delete", "Double-click"):
+            assert f">{key}</b>" in panel._keys_label.text()
 
     def test_the_count_is_announced(self, panel):
         counts = []

@@ -69,7 +69,7 @@ from ..core.project import Project, ProjectError
 from ..core.timecode import format_hms
 from . import theme
 from .ink import InkCanvas, InkToolBar, paint_marks, render_marked
-from .theme import Role, set_flag, set_role
+from .theme import Role, key_hints, set_flag, set_role
 from .video_player import FrameShot
 
 log = logging.getLogger(__name__)
@@ -504,6 +504,14 @@ class CapturePanel(QFrame):
         actions.addStretch(1)
         actions.addWidget(self._delete_button)
 
+        self._keys_label = QLabel(key_hints((
+            ("Ctrl+Z", "undo"), ("Ctrl+Y", "redo"), ("Delete", "delete screenshot"),
+            ("Double-click", "play"),
+        )))
+        self._keys_label.setTextFormat(Qt.TextFormat.RichText)
+        self._keys_label.setWordWrap(True)
+        set_role(self._keys_label, Role.SUBTLE)
+
         self._editor = QWidget()
         editor = QVBoxLayout(self._editor)
         editor.setContentsMargins(12, 4, 12, 10)
@@ -513,6 +521,7 @@ class CapturePanel(QFrame):
         editor.addWidget(self._canvas, 1)
         editor.addWidget(self._tools)
         editor.addLayout(actions)
+        editor.addWidget(self._keys_label)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
