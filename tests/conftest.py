@@ -37,7 +37,7 @@ def _destroy_widgets_after_each_test():
 
     try:
         from PySide6.QtMultimedia import QMediaPlayer
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication, QWidget
     except ImportError:  # pragma: no cover - PySide6 not installed
         return
 
@@ -45,14 +45,25 @@ def _destroy_widgets_after_each_test():
     if app is None:
         return
 
-    for widget in list(app.topLevelWidgets()):
-        # Stop any media pipeline before the widget goes away, otherwise Qt can
-        # block waiting for a decode thread that is still reading.
-        for player in widget.findChildren(QMediaPlayer):
-            player.stop()
-            player.setSource(player.source().__class__())
-        widget.close()
-        widget.deleteLater()
+    # A widget a test made without a parent and dropped is freed by the cycle
+    # collector whenever it next runs. Run it now, and not again until the list
+    # below has been gone through: run while that list was being made, it freed
+    # a widget the list already pointed at, which came back as a bare QObject.
+    gc.collect()
+    gc.disable()
+    try:
+        for widget in list(app.topLevelWidgets()):
+            if not isinstance(widget, QWidget):
+                continue
+            # Stop any media pipeline before the widget goes away, otherwise Qt
+            # can block waiting for a decode thread that is still reading.
+            for player in widget.findChildren(QMediaPlayer):
+                player.stop()
+                player.setSource(player.source().__class__())
+            widget.close()
+            widget.deleteLater()
+    finally:
+        gc.enable()
 
     app.processEvents()
     gc.collect()
