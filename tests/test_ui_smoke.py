@@ -997,15 +997,17 @@ class TestEditingFromTheWindow:
         assert names[:2] == ["Undo", "Redo"]
 
     def test_edits_are_autosaved_after_a_pause(self, window):
-        from PySide6.QtTest import QTest
-
         view = window._lecture_view
         view._on_text_edited("segment_001", "Autosaved text")
         assert window._autosave.pending
+        # Not written on the keystroke itself, only once typing pauses.
+        before = Project.open(window.project.root).transcript.get("segment_001")
+        assert before.effective_text != "Autosaved text"
 
-        QTest.qWait(1_100)
-
-        assert not window._autosave.pending
+        # Waited for rather than slept through: on a busy machine Qt was seen to
+        # spend 1-3 s inside one wait tearing down earlier tests' media players,
+        # and a fixed 1.1 s then failed before the 0.75 s timer could fire.
+        assert pump_until(lambda: not window._autosave.pending, timeout=5.0)
         reopened = Project.open(window.project.root)
         assert reopened.transcript.get("segment_001").effective_text == "Autosaved text"
         assert "saved" in view._save_label.text().lower()
