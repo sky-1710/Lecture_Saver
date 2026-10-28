@@ -23,6 +23,8 @@ from __future__ import annotations
 import bisect
 import itertools
 import logging
+import subprocess
+import sys
 import zlib
 from functools import lru_cache
 from pathlib import Path
@@ -51,6 +53,7 @@ __all__ = [
     "OPENVINO_MODELS",
     "OpenVinoEngine",
     "OpenVinoUnavailableError",
+    "gpu_probe",
     "openvino_gpu_available",
 ]
 
@@ -75,9 +78,23 @@ class OpenVinoUnavailableError(ModelLoadError):
     """OpenVINO is not installed, or could not run the model on any device."""
 
 
+#: Asks OpenVINO for its GPUs in a process of its own (see gpu_probe below).
+_GPU_PROBE = (
+    "import openvino; "
+    "print(int(any(d.startswith('GPU') for d in openvino.Core().available_devices)))"
+)
+
+
 @lru_cache(maxsize=1)
 def openvino_gpu_available() -> bool:
-    """Whether OpenVINO sees a GPU it can run on. Probed once per session."""
+    """Whether OpenVINO sees a GPU it can run on. Probed once per session.
+
+    For the engine only, on the thread that goes on to transcribe: OpenVINO
+    asked about the GPU on one thread and transcribing on another left the
+    application unable to end - closed after a transcription, the process
+    stayed behind holding the GPU, and not even TerminateProcess ended it.
+    The interface asks :func:`gpu_probe` instead.
+    """
     try:
         import openvino
 
@@ -85,6 +102,26 @@ def openvino_gpu_available() -> bool:
     except Exception:  # noqa: BLE001 - probing must never break the UI
         log.debug("OpenVINO GPU probe failed", exc_info=True)
         return False
+
+
+@lru_cache(maxsize=1)
+def gpu_probe() -> bool:
+    """Whether OpenVINO sees a GPU, asked in a separate Python process.
+
+    For the interface, which must not touch OpenVINO itself (see
+    :func:`openvino_gpu_available`). It takes about a second, so call it off
+    the interface thread. Remembered for the session.
+    """
+    try:
+        answer = subprocess.run(
+            [sys.executable, "-c", _GPU_PROBE],
+            capture_output=True, text=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        log.debug("OpenVINO GPU probe could not run", exc_info=True)
+        return False
+    return answer.returncode == 0 and answer.stdout.strip().endswith("1")
 
 
 class OpenVinoEngine:

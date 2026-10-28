@@ -7,6 +7,8 @@ know that before they start rather than after.
 
 from __future__ import annotations
 
+import threading
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -24,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.timecode import format_duration, format_hms
-from ..transcription.openvino_engine import openvino_gpu_available
+from ..transcription.openvino_engine import gpu_probe
 from ..transcription.whisper_engine import (
     ENGINE_OPENVINO,
     KEYWORD_CHAR_LIMIT,
@@ -55,9 +57,15 @@ class TranscribePanel(QFrame):
     cancelRequested = Signal()
     #: Read the slide images and fill the keywords with their terms.
     keywordsFromSlidesRequested = Signal()
+    #: The GPU probe answered, from its thread.
+    _gpuProbed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        #: Whether OpenVINO sees a GPU: None until the probe has answered.
+        self._gpu: bool | None = None
+        self._probing = False
+        self._gpuProbed.connect(self._on_gpu_probed)
         self._resume_at: float | None = None
         self.setFrameShape(QFrame.Shape.NoFrame)
         set_flag(self, "card")
@@ -424,6 +432,25 @@ class TranscribePanel(QFrame):
         self._cancel_button.setText("Cancelling...")
         self.cancelRequested.emit()
 
+    def _probe_gpu(self) -> None:
+        """Ask once, in the background, whether there is a GPU to run on.
+
+        In a separate process and off this thread: the probe takes about a
+        second, and OpenVINO used for the GPU here as well as on the
+        transcription thread left the application unable to end.
+        """
+        if self._probing:
+            return
+        self._probing = True
+        threading.Thread(
+            target=lambda: self._gpuProbed.emit(gpu_probe()), name="gpu-probe", daemon=True
+        ).start()
+
+    def _on_gpu_probed(self, gpu: bool) -> None:
+        self._gpu = gpu
+        self._probing = False
+        self._update_estimate()
+
     def _update_estimate(self) -> None:
         if self._video_duration <= 0:
             self._estimate_label.setText("")
@@ -431,7 +458,11 @@ class TranscribePanel(QFrame):
         model = str(self._model_box.currentData())
         # Say which hardware this machine will actually use rather than assuming.
         if engine_for_model(model) == ENGINE_OPENVINO:
-            gpu = openvino_gpu_available()
+            gpu = self._gpu
+            if gpu is None:
+                self._probe_gpu()
+                self._estimate_label.setText("Checking this computer's GPU for the estimate...")
+                return
             estimate = estimate_seconds(self._video_duration, model, gpu=gpu)
             hardware = (
                 "it runs on the Intel GPU" if gpu

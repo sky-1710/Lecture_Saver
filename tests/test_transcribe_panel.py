@@ -21,9 +21,23 @@ from lecture_saver.ui.lecture_view import _transcription_choices  # noqa: E402
 from lecture_saver.ui.transcribe_panel import TranscribePanel  # noqa: E402
 
 
+def _pump_until(predicate, timeout=5.0):
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
 @pytest.fixture
 def panel(qapp, monkeypatch):
-    monkeypatch.setattr(transcribe_panel, "openvino_gpu_available", lambda: True)
+    monkeypatch.setattr(transcribe_panel, "gpu_probe", lambda: True)
     return TranscribePanel()
 
 
@@ -43,12 +57,37 @@ class TestPanel:
         assert panel._keywords_edit.toPlainText() == ""
         assert panel.options().model_size == "medium"
 
-    def test_the_estimate_names_the_intel_gpu_for_turbo(self, panel, monkeypatch):
+    def test_the_estimate_names_the_intel_gpu_for_turbo(self, panel):
         panel.set_video_duration(3600.0)
-        assert "Intel GPU" in panel._estimate_label.text()
-        monkeypatch.setattr(transcribe_panel, "openvino_gpu_available", lambda: False)
-        panel._update_estimate()
-        assert "no Intel GPU" in panel._estimate_label.text()
+        assert _pump_until(lambda: "Intel GPU" in panel._estimate_label.text())
+        assert "no Intel GPU" not in panel._estimate_label.text()
+
+    def test_without_a_gpu_the_estimate_says_so(self, qapp, monkeypatch):
+        monkeypatch.setattr(transcribe_panel, "gpu_probe", lambda: False)
+        panel = TranscribePanel()
+        panel.set_video_duration(3600.0)
+        assert _pump_until(lambda: "no Intel GPU" in panel._estimate_label.text())
+
+    def test_the_gpu_is_asked_about_off_the_interface_thread(self, qapp, monkeypatch):
+        """OpenVINO asked about the GPU here and used on the transcription
+        thread left the application unable to end."""
+        import threading
+
+        asked_from: list[object] = []
+
+        def probe():
+            asked_from.append(threading.current_thread())
+            return True
+
+        monkeypatch.setattr(transcribe_panel, "gpu_probe", probe)
+        panel = TranscribePanel()
+        panel.set_video_duration(1800.0)
+        assert "Checking" in panel._estimate_label.text()
+        assert _pump_until(lambda: "Intel GPU" in panel._estimate_label.text())
+        assert asked_from and asked_from[0] is not threading.main_thread()
+        # Asked once: changing the estimate again does not ask again.
+        panel.set_video_duration(600.0)
+        assert len(asked_from) == 1
 
     def test_options_are_locked_while_running(self, panel):
         panel.begin_run()
