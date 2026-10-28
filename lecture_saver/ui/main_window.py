@@ -189,6 +189,12 @@ class MainWindow(QMainWindow):
         self._quick_export_action.setShortcut(QKeySequence("Ctrl+E"))
         self._quick_export_action.setEnabled(False)
         file_menu.addAction(self._quick_export_action)
+        self._screenshots_export_action = QAction("Export s&creenshots PDF", self)
+        self._screenshots_export_action.setToolTip(
+            "Every screenshot with its marks in one PDF, two to a page."
+        )
+        self._screenshots_export_action.setEnabled(False)
+        file_menu.addAction(self._screenshots_export_action)
         self._study_pack_action = QAction("Create &study pack...", self)
         self._study_pack_action.setEnabled(False)
         file_menu.addAction(self._study_pack_action)
@@ -251,6 +257,7 @@ class MainWindow(QMainWindow):
         self._export_action.triggered.connect(self._show_export)
         self._quick_export_action.triggered.connect(self._quick_export)
         self._study_pack_action.triggered.connect(self._study_pack)
+        self._screenshots_export_action.triggered.connect(self._export_screenshots)
         self._translate_action.triggered.connect(self._translate_with_ai)
         self._ai_request_action.triggered.connect(self._ai_translation_request)
         self._import_translation_action.triggered.connect(self._import_translation)
@@ -278,6 +285,7 @@ class MainWindow(QMainWindow):
         self._lecture_view.transcriptEdited.connect(self._on_transcript_edited)
         self._lecture_view.exportRequested.connect(self._show_export)
         self._lecture_view.quickExportRequested.connect(self._quick_export)
+        self._lecture_view.screenshotsExportRequested.connect(self._export_screenshots)
         self._lecture_view.studyPackRequested.connect(self._study_pack)
         self._lecture_view.translateRequested.connect(self._translate_with_ai)
         self._lecture_view.aiRequestRequested.connect(self._ai_translation_request)
@@ -409,6 +417,7 @@ class MainWindow(QMainWindow):
         self._reveal_action.setEnabled(True)
         self._export_action.setEnabled(True)
         self._quick_export_action.setEnabled(True)
+        self._screenshots_export_action.setEnabled(True)
         self._study_pack_action.setEnabled(True)
         self._translate_action.setEnabled(True)
         self._ai_request_action.setEnabled(True)
@@ -442,6 +451,7 @@ class MainWindow(QMainWindow):
         self._reveal_action.setEnabled(False)
         self._export_action.setEnabled(False)
         self._quick_export_action.setEnabled(False)
+        self._screenshots_export_action.setEnabled(False)
         self._study_pack_action.setEnabled(False)
         self._translate_action.setEnabled(False)
         self._ai_request_action.setEnabled(False)
@@ -1031,6 +1041,29 @@ class MainWindow(QMainWindow):
             ai_request=False,
         )
 
+    def _export_screenshots(self) -> None:
+        """The screenshots on their own, with their marks, in one PDF to print."""
+        snapshot = self._export_snapshot()
+        if snapshot is None:
+            return
+        document, settings, output = snapshot
+        if not document.has_screenshots:
+            QMessageBox.information(
+                self, "No screenshots yet",
+                "Press S while the video plays - or Screenshot under the video - to "
+                "take one, then export them.",
+            )
+            return
+        from ..export.exporter import run_export
+
+        settings.formats = [ExportFormat.SCREENSHOTS]
+        self._run_export_job(
+            lambda report: run_export(
+                document, settings, output, on_progress=self._export_reporter(report)
+            ),
+            ai_request=False,
+        )
+
     def _ai_translation_request(self) -> None:
         """Export the lecture with a Korean translation request at the top."""
         if self.project is None:
@@ -1269,7 +1302,7 @@ class MainWindow(QMainWindow):
         has_project = enabled and self.project is not None
         for action in (
             self._export_action, self._quick_export_action, self._translate_action,
-            self._study_pack_action,
+            self._study_pack_action, self._screenshots_export_action,
             self._ai_request_action, self._import_translation_action,
         ):
             action.setEnabled(has_project)

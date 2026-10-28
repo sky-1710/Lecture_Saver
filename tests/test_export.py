@@ -394,7 +394,14 @@ def test_a_missing_korean_font_fails_loudly(document, tmp_path, monkeypatch):
 
 class TestRunExport:
     @needs_korean_font
-    def test_every_format_is_written_to_the_output_folder(self, document, project):
+    def test_every_format_is_written_to_the_output_folder(self, project):
+        from lecture_saver.core.captures import Capture, CaptureSet
+
+        # A screenshot, so the screenshots PDF has something to print.
+        capture = Capture(capture_id=1, time=5.0, start=5.0, image=CaptureSet.image_name(1))
+        _jpeg(project.root / capture.image)
+        project.captures.add(capture)
+        document = build_document(project)
         settings = ExportSettings(formats=list(ExportFormat))
         result = run_export(document, settings, project.exports_dir)
         assert result.ok

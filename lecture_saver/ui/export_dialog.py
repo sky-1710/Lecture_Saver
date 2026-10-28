@@ -149,6 +149,7 @@ class ExportDialog(QDialog):
             "transcript": QCheckBox("Transcript"),
             "segment_timestamps": QCheckBox("Transcript timestamps"),
             "translation": QCheckBox("Korean translation (when imported)"),
+            "screenshots": QCheckBox("My screenshots in the notes too"),
         }
         for name, check in self._pdf_checks.items():
             check.setChecked(getattr(settings.pdf, name))

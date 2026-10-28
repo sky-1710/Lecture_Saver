@@ -2,6 +2,8 @@
 
 Left: slide navigator - thumbnails, numbers, timestamps, click-to-seek.
 Centre: video player, and under it the Ask AI panel when it is open.
+Beside it, when open: the screenshots taken of the video, to look through,
+re-mark and play from.
 Right: transcription controls and the transcript, either for the current slide
 (with its picture and time range) or for the whole lecture.
 
@@ -16,6 +18,7 @@ other and the rules can be changed in one place:
 * While a segment is being typed in, playback never moves the list away from it.
 * A time or slide an AI answer cites works like a search result: the video
   seeks there and the line or slide is shown.
+* Playing a screenshot does the same for where its marking began, then plays.
 
 Transcript edits made here are applied to the project's single transcript store
 and announced with :attr:`LectureView.transcriptEdited`, so the window can
@@ -65,12 +68,13 @@ from ..slides.slide_text import unavailable_reason
 from ..transcription.resume import resume_point
 from ..transcription.whisper_engine import WhisperOptions
 from .ask_panel import AskPanel
+from .capture_panel import CapturePanel
 from .find_bar import FindBar
 from .slide_panel import SlidePanel
 from .theme import Role, set_flag, set_role
 from .transcribe_panel import TranscribePanel
 from .transcript_view import TranscriptView
-from .video_player import VideoPlayer
+from .video_player import FrameShot, VideoPlayer
 
 log = logging.getLogger(__name__)
 
@@ -196,6 +200,8 @@ class LectureView(QWidget):
     aiRequestRequested = Signal()
     #: Bring an assistant's translation back in.
     importTranslationRequested = Signal()
+    #: Export the screenshots on their own as a PDF.
+    screenshotsExportRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -323,9 +329,16 @@ class LectureView(QWidget):
             "Ask an AI assistant about the lecture while you watch.\n"
             "To ask about a line, use the Ask AI button on it in the transcript."
         )
+        self._captures_button = QPushButton("Screenshots")
+        self._captures_button.setCheckable(True)
+        self._captures_button.setToolTip(
+            "The screenshots of this lecture: look through them, change their "
+            "marks, and play the video from any of them."
+        )
         follow_bar = QHBoxLayout()
         follow_bar.setContentsMargins(0, 0, 0, 0)
         follow_bar.addWidget(self._ask_button)
+        follow_bar.addWidget(self._captures_button)
         follow_bar.addStretch(1)
         follow_bar.addWidget(self._follow_check)
 
@@ -349,6 +362,11 @@ class LectureView(QWidget):
         self._centre_split.setChildrenCollapsible(False)
         self._centre_split.setHandleWidth(10)
         centre = self._centre_split
+
+        # --- beside the video: screenshots, when open ---
+        self._capture_panel = CapturePanel()
+        self._capture_panel.setMinimumWidth(260)
+        self._capture_panel.setVisible(False)
 
         # --- right: transcription + transcript ---
         self._panel = TranscribePanel()
@@ -503,11 +521,13 @@ class LectureView(QWidget):
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.addWidget(self._slides_pane)
         self._splitter.addWidget(centre)
+        self._splitter.addWidget(self._capture_panel)
         self._splitter.addWidget(right)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 3)
         self._splitter.setStretchFactor(2, 2)
-        self._splitter.setSizes([240, 590, 410])
+        self._splitter.setStretchFactor(3, 2)
+        self._splitter.setSizes([240, 590, 0, 410])
         # Keeps the window usable when it is made small (§11).
         self._splitter.setChildrenCollapsible(True)
         self._splitter.setHandleWidth(10)
@@ -580,6 +600,15 @@ class LectureView(QWidget):
         self._slides_pane.moveBoundaryRequested.connect(self._on_move_boundary)
         self._slides_pane.separateRequested.connect(self.slideSeparateRequested)
 
+        self._player.screenshotTaken.connect(self._on_screenshot)
+        self._player.screenshotFailed.connect(self.statusMessage)
+        self._captures_button.toggled.connect(self._set_captures_visible)
+        self._capture_panel.hideRequested.connect(lambda: self._captures_button.setChecked(False))
+        self._capture_panel.playRequested.connect(self.play_from)
+        self._capture_panel.statusMessage.connect(self.statusMessage)
+        self._capture_panel.countChanged.connect(self._on_capture_count)
+        self._capture_panel.exportRequested.connect(self.screenshotsExportRequested)
+
         self._ask_button.toggled.connect(self._set_ask_visible)
         self._ask_panel.hideRequested.connect(lambda: self._ask_button.setChecked(False))
         self._ask_panel.seekRequested.connect(self.go_to_time)
@@ -645,6 +674,7 @@ class LectureView(QWidget):
         self.refresh_transcript()
         self.refresh_slides()
         self._ask_panel.bind(project)
+        self._capture_panel.bind(project)
 
     def refresh_transcript(self) -> None:
         """Re-bind the view to the project's transcript - the one source (§14)."""
@@ -666,6 +696,7 @@ class LectureView(QWidget):
 
     def close_project(self) -> None:
         self._ask_panel.bind(None)
+        self._capture_panel.bind(None)
         self._project = None
         self._player.clear()
         self._transcript.clear_segments()
@@ -1347,9 +1378,51 @@ class LectureView(QWidget):
     def shutdown(self) -> None:
         """Stop work this view runs in the background, before the window closes."""
         self._ask_panel.shutdown()
+        self._capture_panel.flush()
+        self._player.shutdown()
 
     def show_ask_panel(self) -> None:
         self._ask_button.setChecked(True)
+
+    # -- screenshots ------------------------------------------------------------
+
+    @property
+    def capture_panel(self) -> CapturePanel:
+        return self._capture_panel
+
+    @property
+    def player(self) -> VideoPlayer:
+        return self._player
+
+    def _on_screenshot(self, shot: FrameShot) -> None:
+        capture = self._capture_panel.add_screenshot(shot)
+        if capture is None:
+            return
+        where = format_hms(capture.time)
+        if self._capture_panel.isVisible():
+            self.statusMessage.emit(f"Screenshot saved at {where}")
+        else:
+            self.statusMessage.emit(f"Screenshot saved at {where} - open Screenshots to see it")
+
+    def _on_capture_count(self, count: int) -> None:
+        self._captures_button.setText(f"Screenshots ({count})" if count else "Screenshots")
+
+    def _set_captures_visible(self, visible: bool) -> None:
+        self._capture_panel.setVisible(visible)
+        set_flag(self._captures_button, "accent", visible)
+        if not visible:
+            return
+        # Opened for the first time, the splitter has no width for it yet: it
+        # takes its share from the video and the transcript alike.
+        sizes = self._splitter.sizes()
+        wanted = max(self._capture_panel.minimumWidth(), 340)
+        if len(sizes) == 4 and sizes[2] < self._capture_panel.minimumWidth():
+            centre, right = sizes[1], sizes[3]
+            from_centre = wanted * centre // max(1, centre + right)
+            self._splitter.setSizes([
+                sizes[0], max(1, centre - from_centre), wanted,
+                max(1, right - (wanted - from_centre)),
+            ])
 
     def _set_ask_visible(self, visible: bool) -> None:
         self._ask_panel.setVisible(visible)
@@ -1424,6 +1497,13 @@ class LectureView(QWidget):
         self._transcript.select_row(row)
         self._highlight(seconds)
 
+    def play_from(self, seconds: float) -> None:
+        """Go to ``seconds`` as :meth:`go_to_time` does, and play from there."""
+        if self._project is None or self._project.video_missing:
+            return
+        self.go_to_time(seconds)
+        self._player.play()
+
     def go_to_slide(self, number: int) -> None:
         """Follow a slide an answer cited: show it and seek to its start."""
         if self._project is None:
@@ -1475,11 +1555,16 @@ class LectureView(QWidget):
         self._player.pause()
 
     def finish_editing(self) -> None:
-        """Close an open line editor and its typing session."""
+        """Close an open line editor and its typing session.
+
+        Screenshot marks changed a moment ago are written too, so an export
+        that follows prints them.
+        """
         self._transcript.finish_editing()
         store = self._store()
         if store is not None:
             store.end_typing()
+        self._capture_panel.flush()
 
     def set_export_enabled(self, enabled: bool) -> None:
         for button in (
@@ -1487,6 +1572,7 @@ class LectureView(QWidget):
             self._translate_button, self._more_button,
         ):
             button.setEnabled(enabled)
+        self._capture_panel.set_export_enabled(enabled)
 
     # -- synchronisation (§12) ---------------------------------------------
 

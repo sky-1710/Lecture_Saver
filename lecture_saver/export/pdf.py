@@ -13,6 +13,10 @@ The goal is lecture notes rather than a debug dump:
 * One that pairs English with Korean paragraphs replaces the plain transcript,
   with a light rule between every paragraph so the original and its
   translation never run together.
+* The user's screenshots of the video, with their marks drawn in, can sit in the
+  transcript where they were taken: after the paragraph being spoken then.
+  They also have a PDF of their own, :func:`write_screenshots_pdf`: only the
+  screenshots, two to a page, to print and study from.
 * Korean, English and mixed text all come from one embedded TrueType font. If no
   font that can draw Korean is found the export fails with a clear message
   instead of producing a PDF full of empty boxes.
@@ -28,8 +32,9 @@ from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from ..core.atomic_io import replace_file
 from ..core.timecode import format_duration, format_hms
-from .document import LectureDocument, Section, paragraphs
+from .document import LectureDocument, Screenshot, Section, paragraphs
 from .options import PdfOptions
 
 __all__ = [
@@ -41,10 +46,14 @@ __all__ = [
     "notes_story",
     "pdf_styles",
     "write_pdf",
+    "write_screenshots_pdf",
 ]
 
 #: Fraction of the text frame's height a slide picture may take.
 MAX_IMAGE_HEIGHT_FRACTION = 0.5
+#: Height left on a page of the screenshots PDF for each one's caption and
+#: spacing, in points - so two fit on a page.
+SCREENSHOT_CAPTION_ROOM = 40
 
 _REGULAR = "LectureSaverSans"
 _BOLD = "LectureSaverSans-Bold"
@@ -157,6 +166,72 @@ def write_pdf(
     build_pdf(path, document.title, story)
 
 
+def write_screenshots_pdf(document: LectureDocument, path: Path) -> None:
+    """Write only the screenshots, in the order of the lecture, to ``path``.
+
+    Each one is printed with its marks, as large as two to a page allows, under
+    a line saying which screenshot it is, its time, its slide and where its
+    marking began. Nothing else - the notes PDF is for the transcript.
+    """
+    shots = [
+        (section.number, shot) for section in document.sections for shot in section.screenshots
+    ]
+    if not shots:
+        raise PdfExportError(
+            "There are no screenshots to export yet. Press S while the video plays "
+            "to take one."
+        )
+
+    def story(width: float, height: float) -> list[object]:
+        from reportlab.platypus import KeepTogether, Paragraph, Spacer
+
+        styles = _styles()
+        count = len(shots)
+        meta = [document.video_name, f"{count} screenshot{'s' if count != 1 else ''}",
+                f"Exported {datetime.now():%Y-%m-%d}"]
+        flowables: list[object] = [
+            Paragraph(escape(document.title), styles["title"]),
+            Paragraph(escape("  ·  ".join(meta)), styles["meta"]),
+            Spacer(1, 8),
+        ]
+        room = height / 2 - SCREENSHOT_CAPTION_ROOM
+        for position, (slide, shot) in enumerate(shots, start=1):
+            parts = [f"{position}", format_hms(shot.time)]
+            if slide is not None:
+                parts.append(f"Slide {slide}")
+            if shot.start < shot.time:
+                parts.append(f"marked from {format_hms(shot.start)}")
+            caption = Paragraph(escape("  ·  ".join(parts)), styles["label"])
+            picture = _sized_picture(shot.image, width, room)
+            if picture is None:
+                flowables.append(Paragraph(
+                    escape(f"{parts[0]} · {parts[1]}: the picture could not be read."),
+                    styles["note"],
+                ))
+                continue
+            flowables.append(KeepTogether([caption, picture, Spacer(1, 12)]))
+        return flowables
+
+    build_pdf(path, document.title, story)
+
+
+def _sized_picture(path: Path, width: float, height: float) -> object | None:
+    """``path`` as a centred image no larger than ``width`` x ``height``."""
+    from reportlab.platypus import Image
+
+    try:
+        from PIL import Image as PILImage
+
+        with PILImage.open(path) as picture:
+            pixel_width, pixel_height = picture.size
+    except Exception:  # noqa: BLE001 - an unreadable picture must not sink the PDF
+        return None
+    scale = min(width / pixel_width, height / pixel_height)
+    image = Image(str(path), width=pixel_width * scale, height=pixel_height * scale)
+    image.hAlign = "CENTER"
+    return image
+
+
 def build_pdf(
     path: Path, title: str, make_story: Callable[[float, float], list[object]]
 ) -> None:
@@ -200,7 +275,7 @@ def build_pdf(
             onFirstPage=lambda canvas, d: _footer(canvas, d, title),
             onLaterPages=lambda canvas, d: _footer(canvas, d, title),
         )
-        os.replace(temp, path)
+        replace_file(temp, path)
     except PdfExportError:
         temp.unlink(missing_ok=True)
         raise
@@ -320,8 +395,13 @@ def _story(
         if block:
             story.append(KeepTogether(block))
 
+        shots = list(section.screenshots) if options.screenshots else []
         translated = options.translation and bool(section.translation)
         lines = section.timed_translation if translated else {}
+        if (lines or (translated and section.bilingual) or not options.transcript) and shots:
+            # Without a plain transcript to place them in, they follow the slide.
+            story += [_screenshot(shot, width, height, styles) for shot in shots]
+            shots = []
         if lines:
             story += _interleaved(section, lines, styles, labelled=slides)
             continue
@@ -330,7 +410,8 @@ def _story(
             story += _translation(section, styles)
             continue
         if options.transcript:
-            story += _transcript(section, options, styles, labelled=slides)
+            story += _transcript(section, options, styles, labelled=slides,
+                                 shots=[_screenshot_at(s, width, height, styles) for s in shots])
         if translated:
             story += _translation(section, styles)
 
@@ -403,11 +484,14 @@ def _picture(section: Section, width: float, height: float, styles: dict[str, ob
 
 
 def _transcript(
-    section: Section, options: PdfOptions, styles: dict[str, object], *, labelled: bool
+    section: Section, options: PdfOptions, styles: dict[str, object], *, labelled: bool,
+    shots: list[tuple[float, object]] | None = None,
 ) -> list[object]:
+    """The section's speech; ``shots`` - (time, flowable) - go in where taken."""
     from reportlab.platypus import Paragraph
 
     flowables: list[object] = []
+    pending = list(shots or [])
     segments = section.spoken
     if labelled:
         flowables.append(Paragraph("Transcript", styles["label"]))
@@ -416,18 +500,54 @@ def _transcript(
             flowables.append(
                 Paragraph("Nothing was said while this slide was on screen.", styles["note"])
             )
-        return flowables
+        return flowables + [shot for _, shot in pending]
+
+    def taken_before(start: float) -> None:
+        # A screenshot comes after the paragraph being spoken when it was
+        # taken, so it goes in before the first one to begin after it.
+        while pending and pending[0][0] < start:
+            flowables.append(pending.pop(0)[1])
 
     if options.segment_timestamps:
         for segment in segments:
+            taken_before(segment.start)
             stamp = f'<font color="#6B7280">{format_hms(segment.start)}</font>'
             text = escape(segment.effective_text.strip())
             flowables.append(Paragraph(f"{stamp}&nbsp;&nbsp;&nbsp;{text}", styles["stamped"]))
     else:
         for group in paragraphs(segments):
+            taken_before(group[0].start)
             text = " ".join(s.effective_text.strip() for s in group)
             flowables.append(Paragraph(escape(text), styles["body"]))
-    return flowables
+    return flowables + [shot for _, shot in pending]
+
+
+def _screenshot_at(
+    shot: Screenshot, width: float, height: float, styles: dict[str, object]
+) -> tuple[float, object]:
+    return shot.time, _screenshot(shot, width, height, styles)
+
+
+def _screenshot(
+    shot: Screenshot, width: float, height: float, styles: dict[str, object]
+) -> object:
+    """A screenshot with its time above it, kept on one page."""
+    from reportlab.platypus import Image, KeepTogether, Paragraph
+
+    caption = f"Screenshot · {format_hms(shot.time)}"
+    if shot.start < shot.time:
+        caption += f"  ·  marked from {format_hms(shot.start)}"
+    try:
+        from PIL import Image as PILImage
+
+        with PILImage.open(shot.image) as picture:
+            pixel_width, pixel_height = picture.size
+    except Exception:  # noqa: BLE001 - an unreadable picture must not sink the PDF
+        return Paragraph(f"({caption}: the picture could not be read.)", styles["note"])
+    scale = min(width / pixel_width, height * MAX_IMAGE_HEIGHT_FRACTION / pixel_height)
+    image = Image(str(shot.image), width=pixel_width * scale, height=pixel_height * scale)
+    image.hAlign = "CENTER"
+    return KeepTogether([Paragraph(escape(caption), styles["label"]), image])
 
 
 def _interleaved(

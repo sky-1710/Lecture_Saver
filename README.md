@@ -113,6 +113,16 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
 5. **Navigate.** Click any transcript segment or slide thumbnail to jump the
    video there. As the video plays, the matching transcript segment is
    highlighted and scrolled into view.
+   **Draw and take screenshots while you watch.** Press **D** (or *Draw* under
+   the video) and mark the picture as it keeps playing - at any speed, 2x
+   included; Space still pauses. The pen button holds a **free pen**,
+   **underline**, **highlight** and an **eraser** (keys 1-4; its arrow picks
+   one), and beside it is a typed **memo** (5). Press **S** (or *Screenshot*)
+   to keep the picture on screen with your marks. *Screenshots* opens them
+   beside the video: change any screenshot's marks there, and *Play from*
+   replays the stretch you were marking. *Export PDF* at the top of the panel
+   (or **File → Export screenshots PDF**) puts them all in one PDF to print,
+   two to a page.
 6. **Correct the transcript.** Double-click a line to fix it; right-click for
    merge, add, delete and restore original; Ctrl+F to find and replace a
    repeated mistake. Edits save themselves.
@@ -359,6 +369,42 @@ to one language for the whole recording.
   **Nothing is sent to any AI service**; the files are for you to use. A
   lecture transcribed as Korean asks before creating one
 
+### Drawing on the video and screenshots ✅
+
+- **Draw** (D) puts the marks over the video while it keeps playing; Space
+  still pauses and the speed stays as chosen. Switching off hides the marks
+  without losing them; *Clear all* removes them, and Ctrl+Z / Ctrl+Y undo and
+  redo every change, *Clear all* included
+- The **pen** is one button holding four kinds - **free pen** (1), a freehand
+  red line for circling and arrows; **underline** (2), a straight line that
+  snaps level when it is nearly level; **highlight** (3), a dragged box, or a
+  drag along one line of text to band that line; **eraser** (4). Pressing the
+  button goes back to the kind used last, its arrow picks another. **Memo** (5)
+  is typed where you click: Enter keeps it, Esc drops it, clicking a memo
+  changes it. Right-click removes a mark with any tool
+- **Screenshot** (S) keeps the frame on screen at the video's full resolution,
+  with the marks that are showing. Saving happens in the background - about
+  13 ms of the interface's time - so taking one at 2x does not stutter
+- **Screenshots** beside the video lists them in the order of the lecture,
+  with their marks on the thumbnails. The one selected can be re-marked with
+  the same tools; *Play from* starts 2 s before its first mark was drawn (or
+  before the screenshot itself, for one with no marks), selecting the slide
+  and the line too. *Delete...* asks first
+- **Screenshots PDF** - *Export PDF* in the panel, **File → Export
+  screenshots PDF**, or *Screenshots PDF* in *More formats...*: only the
+  screenshots, in the order of the lecture, with their marks, two to a page at
+  the full page width. Above each: its number, time, slide and where its
+  marking began. Written as `<lecture>_screenshots.pdf` to the same folder as
+  the other exports; it needs neither slides nor a transcript
+- They stay out of the notes PDF unless *My screenshots in the notes too* is
+  ticked in *More formats...*; then each sits in the transcript after the
+  paragraph being spoken when it was taken. Each screenshot is also kept as
+  `captures/0001_marked.jpg`, ready to open or print by itself
+- Measured on a 1080p 30 fps video at 2x on this laptop (i7-1165G7): 56 of 59
+  frames a second painted while drawing, the interface answering within its
+  timer resolution. Normal playback still goes through the GPU video widget;
+  only drawing paints frames, on two background threads
+
 ### Ask AI ✅
 
 - A chat under the video about the lecture: ask at any moment, or point at
@@ -435,6 +481,9 @@ Lecture 01/
   transcript.json               the authoritative transcript
   translations.json             imported slide translations
   chat.json                     the Ask AI conversation
+  captures.json                 screenshots: time, where marking began, marks
+  captures/0001.jpg …           each screenshot as the video showed it, and
+  captures/0001_marked.jpg …    with your marks drawn in (what gets printed)
   transcript_original.json      Whisper's output as transcribed, kept for
                                 "Reset to original"; never touched by editing
   slides.json                   detected slides and their appearance intervals
@@ -442,7 +491,8 @@ Lecture 01/
   slides/001.jpg …              representative image per slide
   cache/frame_descriptors.npz   scanned frames (thumbnails + ink masks),
                                 so re-detection skips decoding
-  exports/                      <lecture>_lecture_notes.pdf, <lecture>_transcript.txt/.md/...
+  exports/                      <lecture>_lecture_notes.pdf, <lecture>_screenshots.pdf,
+                                <lecture>_transcript.txt/.md/...
   logs/
 ```
 

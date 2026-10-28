@@ -16,7 +16,7 @@ from pathlib import Path
 from ..core.atomic_io import write_text_atomic
 from .document import LectureDocument
 from .options import ExportFormat, ExportSettings, export_file_name
-from .pdf import PdfExportError, write_pdf
+from .pdf import PdfExportError, write_pdf, write_screenshots_pdf
 from .text_formats import to_json, to_markdown, to_srt, to_txt, to_vtt
 
 log = logging.getLogger(__name__)
@@ -89,6 +89,9 @@ def _write_one(
 ) -> None:
     if export_format is ExportFormat.PDF:
         write_pdf(document, settings.pdf, target)
+        return
+    if export_format is ExportFormat.SCREENSHOTS:
+        write_screenshots_pdf(document, target)
         return
 
     if not document.segments:

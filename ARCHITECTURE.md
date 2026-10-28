@@ -78,6 +78,7 @@ Fully local lecture video → transcript → slide-linked notes.
           transcript_store.py    THE single source of truth (§14)
           slides.py              slide / appearance models + detection options
           alignment.py           which speech belongs to which slide (§10)
+          captures.py            screenshots + their marks; undo for a sheet
           sentences.py           where a line may be cut so sentences survive
           keywords.py            slide text -> course terms for Whisper's hints
           chat.py                the Ask AI conversation (chat.json)
@@ -117,6 +118,9 @@ Fully local lecture video → transcript → slide-linked notes.
           start_view.py          new / open project, drag & drop
           lecture_view.py        player + transcript, wired together
           video_player.py        QMediaPlayer widget + transport controls
+          video_canvas.py        frames painted with marks over them, threaded
+          ink.py                 pen / underline / highlight / eraser / memo
+          capture_panel.py       screenshots beside the video: re-mark, replay
           transcript_view.py     virtualised segment list, "Ask AI" on each line
           ask_panel.py           Ask AI chat under the video
           transcribe_panel.py    model options, progress, cancel
@@ -136,6 +140,8 @@ Fully local lecture video → transcript → slide-linked notes.
       slides.json         slide identities + appearance intervals
       audio/lecture.wav   16 kHz mono, deletable, regenerable
       slides/001.jpg      representative image per slide
+      captures.json       the user's screenshots: time, marking start, marks
+      captures/0001.jpg   a screenshot as the video showed it; _marked.jpg with marks
       cache/frame_descriptors.npz   scanned frames; deletable, costs a re-scan
       exports/            Phase 6
       logs/project.log
@@ -651,3 +657,56 @@ rewrite, since most edits are a corrected word the quiz never asks about.
 as the notes PDF, and every PDF goes through `pdf.build_pdf()` for the font,
 footer and atomic write; the two can never drift apart.
 
+---
+
+## 14. Drawing on the video and screenshots
+
+**Why the video is painted by the app while drawing.** On Windows a
+`QVideoWidget` is a native window, and nothing can be painted over it. Frames
+therefore go to a `QVideoSink` of the player's own first and are handed on to
+whichever surface shows: the `QVideoWidget` normally (GPU scaling, no cost),
+or - while Draw is on - `VideoCanvas`, which paints the frame with the marks
+over it. Handing a frame to the widget's own sink by hand was checked on
+screen before relying on it. Switching converts the current frame at once, so
+neither direction flashes a blank picture. Two alternatives were measured and
+dropped: feeding the hidden widget too while drawing (it cost a tenth of the
+frames at 2x), and switching the player's output to the canvas
+(`setVideoOutput` during playback stalled it for over a second).
+
+**2x playback.** Converting a 1080p frame (`toImage`, ~11 ms) and scaling it
+to the view (~4 ms with `QPainter`; `QImage.scaled` took ~20 ms) is too much
+for the interface thread at 60 frames a second. Two background threads do it,
+newest frame wins: a frame that arrives while both are busy replaces the one
+waiting, so the picture never queues behind the sound. Both calls release the
+GIL (the interface thread kept >90% of its speed in a spin test). Measured on
+1080p30 at 2x: 56 of 59 frames painted, interface timer at its normal 14 ms.
+
+**The threads never end.** Qt keeps a GPU context for each thread that calls
+`toImage`. A converting thread that exited - Python thread or `QThread` alike
+- left the next `QMediaPlayer.setSource(QUrl())` hanging forever, i.e.
+closing a lecture after drawing froze the app. Threads that stay alive do
+not; so the pool starts on first use and its threads wait idle for the rest
+of the run. Hiding the canvas only stops handing them frames, and never waits
+for one being converted: the result of a renderer stopped meanwhile is
+dropped, checked under the same lock `stop()` takes.
+
+**Marks are data, not pixels.** `core/captures.py`: each mark is kept in
+fractions of the picture (pen strokes simplified with Ramer-Douglas-Peucker),
+so the same marks draw on the live video, the panel's small view, the
+thumbnails and the full-size picture; screenshots stay editable. The frame is
+saved untouched and a `_marked.jpg` copy is rendered by the same painting
+code for the PDF - no second renderer to drift from the screen.
+
+**Saving does not stutter playback.** A screenshot is listed at once from the
+picture in memory; its JPEGs are written on a background thread (~150 ms
+otherwise) and `captures.json` is only saved once the pictures it names are on
+disk. Closing, switching lecture and exporting wait for the writes.
+
+**Where a screenshot belongs.** To the slide appearance on screen at its time
+(as alignment does for speech). Exported on its own, as
+`ExportFormat.SCREENSHOTS` (`pdf.write_screenshots_pdf`): only the
+screenshots, two to an A4 page, through the same `build_pdf` as the notes. In
+the notes only when asked (`PdfOptions.screenshots`, off by default), after the
+paragraph being spoken when it was taken. *Play* starts 2 s before the first
+mark drawn for it - the moment the user started picking things out - not at
+the screenshot.

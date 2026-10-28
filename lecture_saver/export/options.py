@@ -69,6 +69,8 @@ def resolve_output_dir(
 
 class ExportFormat(str, Enum):
     PDF = "pdf"
+    #: The user's screenshots on their own, with their marks - for printing.
+    SCREENSHOTS = "screenshots"
     TXT = "txt"
     MARKDOWN = "md"
     SRT = "srt"
@@ -82,6 +84,7 @@ class ExportFormat(str, Enum):
 
 _LABELS = {
     ExportFormat.PDF: "Slide + Transcript PDF",
+    ExportFormat.SCREENSHOTS: "Screenshots PDF",
     ExportFormat.TXT: "Transcript TXT",
     ExportFormat.MARKDOWN: "Markdown",
     ExportFormat.SRT: "SRT subtitles",
@@ -93,6 +96,7 @@ _LABELS = {
 #: with the lecture's name in front - see :func:`export_file_name`.
 FILE_NAMES = {
     ExportFormat.PDF: "lecture_notes.pdf",
+    ExportFormat.SCREENSHOTS: "screenshots.pdf",
     ExportFormat.TXT: "transcript.txt",
     ExportFormat.MARKDOWN: "transcript.md",
     ExportFormat.SRT: "transcript.srt",
@@ -112,6 +116,9 @@ class PdfOptions:
     segment_timestamps: bool = False
     #: The imported translation under each slide's transcript, when there is one.
     translation: bool = True
+    #: The user's screenshots in the notes too, where they were taken. Off by
+    #: default: they have a PDF of their own (:attr:`ExportFormat.SCREENSHOTS`).
+    screenshots: bool = False
 
     @property
     def shows_slides(self) -> bool:
@@ -119,7 +126,8 @@ class PdfOptions:
 
     @property
     def is_empty(self) -> bool:
-        return not (self.shows_slides or self.transcript or self.translation)
+        return not (self.shows_slides or self.transcript or self.translation
+                    or self.screenshots)
 
 
 PDF_PRESETS: dict[str, PdfOptions] = {

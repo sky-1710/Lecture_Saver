@@ -8,6 +8,7 @@ shows, from :func:`lecture_saver.core.alignment.align`.
 
 from __future__ import annotations
 
+import bisect
 import re
 import unicodedata
 from dataclasses import dataclass, field, replace
@@ -20,11 +21,13 @@ from ..core.translations import parse_timed_lines
 
 __all__ = [
     "LectureDocument",
+    "Screenshot",
     "Section",
     "TranslationBlock",
     "build_document",
     "nfc",
     "pair_timed_translation",
+    "screenshots_by_section",
     "paragraphs",
     "spoken",
     "translation_blocks",
@@ -120,6 +123,19 @@ def _whole_second(segment: TranscriptSegment) -> int:
 
 
 @dataclass(frozen=True)
+class Screenshot:
+    """A screenshot the user took of the video, as it is printed."""
+
+    #: The moment of the video it shows, in seconds.
+    time: float
+    #: Where its marking began.
+    start: float
+    #: The picture to print - with the marks drawn in when there are any.
+    image: Path
+    marks: int
+
+
+@dataclass(frozen=True)
 class Section:
     """One slide appearance and what was said while it was on screen.
 
@@ -145,6 +161,8 @@ class Section:
     #: The displayed number of the earlier appearance of this same slide, when
     #: the professor returned to it.
     repeat_of: int | None = None
+    #: Screenshots taken while this slide was on screen, in order.
+    screenshots: tuple[Screenshot, ...] = ()
 
     @property
     def spoken(self) -> tuple[TranscriptSegment, ...]:
@@ -194,6 +212,10 @@ class LectureDocument:
     def has_translation(self) -> bool:
         return any(section.translation for section in self.sections)
 
+    @property
+    def has_screenshots(self) -> bool:
+        return any(section.screenshots for section in self.sections)
+
 
 def spoken(segments: tuple[TranscriptSegment, ...] | list[TranscriptSegment]) -> tuple[
     TranscriptSegment, ...
@@ -231,16 +253,43 @@ def _normalised(segment: TranscriptSegment) -> TranscriptSegment:
     )
 
 
+def screenshots_by_section(project: Project) -> list[list[Screenshot]]:
+    """The lecture's screenshots, grouped by the slide on screen when each was taken.
+
+    One group per slide appearance - or a single group without slides. A
+    screenshot from before the first slide goes with it, one from after the
+    last slide's end with the last. Screenshots whose picture is missing are
+    left out; a missing marked copy falls back to the plain picture.
+    """
+    appearances = project.slides.appearances
+    starts = [a.start for a in appearances]
+    groups: list[list[Screenshot]] = [[] for _ in range(max(1, len(appearances)))]
+    for capture in project.captures:
+        picture = project.root / capture.printed_image
+        if not picture.is_file():
+            picture = capture.image_path(project.root)
+        if not picture.is_file():
+            continue
+        index = max(0, bisect.bisect_right(starts, capture.time) - 1) if starts else 0
+        groups[index].append(
+            Screenshot(time=capture.time, start=capture.start, image=picture,
+                       marks=len(capture.marks))
+        )
+    return groups
+
+
 def build_document(project: Project) -> LectureDocument:
     segments = tuple(_normalised(s) for s in project.transcript.segments)
     appearances = project.slides.appearances
     duration = project.video.duration or (segments[-1].end if segments else 0.0)
+    screenshots = screenshots_by_section(project)
 
     if not appearances:
         sections: tuple[Section, ...] = (
             Section(
                 number=None, slide_id=None, label="", annotation_state=None,
                 start=0.0, end=duration, image=None, image_ref="", segments=segments,
+                screenshots=tuple(screenshots[0]),
             ),
         )
     else:
@@ -266,6 +315,7 @@ def build_document(project: Project) -> LectureDocument:
                         earlier.appearance_id
                         if (earlier := project.slides.repeat_of(appearance)) else None
                     ),
+                    screenshots=tuple(screenshots[index]),
                 )
             )
         sections = tuple(built)

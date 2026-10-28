@@ -372,6 +372,24 @@ QToolButton:pressed {{
     background: {SURFACE_SUNKEN};
 }}
 
+/* The drawing tool in use. */
+QToolButton:checked {{
+    background: {ACCENT_SOFT};
+    border-color: {ACCENT_SOFT};
+    color: {ACCENT};
+}}
+
+/* A tool button with a menu beside it - the pen and its kinds. */
+QToolButton[popupMode="1"] {{
+    padding-right: 18px;
+}}
+
+QToolButton::menu-button {{
+    border: none;
+    border-left: 1px solid {BORDER};
+    width: 14px;
+}}
+
 QToolButton:disabled {{
     color: {DISABLED};
 }}

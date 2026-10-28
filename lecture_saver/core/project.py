@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .alignment import Alignment, align
 from .atomic_io import read_json, write_json_atomic
+from .captures import CaptureSet
 from .chat import ChatLog
 from .models import ProjectMeta, StageStatus, Transcript, VideoInfo
 from .slides import SlideSet
@@ -42,6 +43,8 @@ TRANSLATIONS_FILE = "translations.json"
 STUDY_FILE = "study.json"
 #: Questions asked about the lecture and the assistant's answers.
 CHAT_FILE = "chat.json"
+#: Screenshots of the video and the marks drawn on them.
+CAPTURES_FILE = "captures.json"
 
 
 class ProjectError(RuntimeError):
@@ -94,6 +97,8 @@ class Project:
         self.study = StudySet()
         #: The conversation with the assistant. Empty until a question is asked.
         self.chat = ChatLog()
+        #: Screenshots the user took of the video. Empty until one is taken.
+        self.captures = CaptureSet()
 
     # -- paths --------------------------------------------------------------
 
@@ -126,6 +131,10 @@ class Project:
         return self.root / SLIDES_FILE
 
     @property
+    def captures_file(self) -> Path:
+        return self.root / CAPTURES_FILE
+
+    @property
     def cache_dir(self) -> Path:
         """Regenerable intermediates. Safe to delete; costs only a re-scan."""
         return self.root / "cache"
@@ -148,6 +157,11 @@ class Project:
     def slides_dir(self) -> Path:
         """Representative slide images."""
         return self.root / "slides"
+
+    @property
+    def captures_dir(self) -> Path:
+        """Screenshots of the video. Made when the first one is taken."""
+        return self.root / "captures"
 
     @property
     def exports_dir(self) -> Path:
@@ -266,7 +280,20 @@ class Project:
         project.translations = cls._load_translations(root)
         project.study = cls._load_study(root)
         project.chat = cls._load_chat(root)
+        project.captures = cls._load_captures(root)
         return project
+
+    @staticmethod
+    def _load_captures(root: Path) -> CaptureSet:
+        """Read captures.json. A damaged file loses the list, not the pictures."""
+        path = root / CAPTURES_FILE
+        if not path.is_file():
+            return CaptureSet()
+        try:
+            return CaptureSet.from_dict(read_json(path))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            log.warning("Ignoring an unreadable %s", CAPTURES_FILE, exc_info=True)
+            return CaptureSet()
 
     @staticmethod
     def _load_study(root: Path) -> StudySet:
@@ -380,6 +407,29 @@ class Project:
             write_json_atomic(self.chat_file, self.chat.to_dict())
         except OSError as exc:
             raise ProjectError(f"Could not save {CHAT_FILE}:\n{exc}") from exc
+
+    def save_captures(self) -> None:
+        try:
+            write_json_atomic(self.captures_file, self.captures.to_dict())
+        except OSError as exc:
+            raise ProjectError(f"Could not save {CAPTURES_FILE}:\n{exc}") from exc
+
+    def delete_capture(self, capture_id: int) -> bool:
+        """Forget a screenshot and delete its pictures. False if there was none.
+
+        The list is saved before the files go, so a failure part-way leaves a
+        stray picture rather than a screenshot whose picture is missing.
+        """
+        capture = self.captures.remove(capture_id)
+        if capture is None:
+            return False
+        self.save_captures()
+        for name in (capture.image, capture.marked_image):
+            try:
+                (self.root / name).unlink(missing_ok=True)
+            except OSError:
+                log.warning("Could not delete %s", name, exc_info=True)
+        return True
 
     def save_translations(self) -> None:
         try:
