@@ -175,6 +175,39 @@ class TestAtomicWrites:
         write_json_atomic(path, {"a": 1})
         assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1}
 
+    def test_a_rename_refused_for_a_moment_is_tried_again(self, tmp_path, monkeypatch):
+        """An antivirus scan or a sync client holding the file briefly (Windows)."""
+        import os
+
+        from lecture_saver.core import atomic_io
+
+        real, refusals = os.replace, []
+
+        def busy_twice(source, target):
+            if len(refusals) < 2:
+                refusals.append(target)
+                raise PermissionError(13, "Access is denied")
+            real(source, target)
+
+        monkeypatch.setattr(atomic_io.os, "replace", busy_twice)
+        monkeypatch.setattr(atomic_io.time, "sleep", lambda _seconds: None)
+        path = tmp_path / "data.json"
+        write_json_atomic(path, {"a": 1})
+        assert len(refusals) == 2
+        assert read_json(path) == {"a": 1}
+
+    def test_a_rename_refused_for_good_still_fails_and_cleans_up(self, tmp_path, monkeypatch):
+        from lecture_saver.core import atomic_io
+
+        def always_busy(source, target):
+            raise PermissionError(13, "Access is denied")
+
+        monkeypatch.setattr(atomic_io.os, "replace", always_busy)
+        monkeypatch.setattr(atomic_io.time, "sleep", lambda _seconds: None)
+        with pytest.raises(PermissionError):
+            write_json_atomic(tmp_path / "data.json", {"a": 1})
+        assert list(tmp_path.iterdir()) == []
+
 
 class TestAlignment:
     """``Project.align`` keeps transcript links derived from the current times (§10)."""

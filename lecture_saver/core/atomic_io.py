@@ -7,6 +7,12 @@ file goes next to the target rather than into ``%TEMP%``.
 
 Serialising before touching the disk matters too: if the data cannot be encoded,
 the existing file is left completely untouched instead of being truncated.
+
+On Windows the rename itself can be refused for a moment: an antivirus scan, the
+search indexer or a sync client (OneDrive, iCloud) that has just opened the
+target holds it without sharing deletion, and ``os.replace`` fails with
+"Access is denied". :func:`replace_file` tries again for about a second
+before giving up, which is what such a hold lasts.
 """
 
 from __future__ import annotations
@@ -14,10 +20,25 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
-__all__ = ["write_json_atomic", "read_json", "write_text_atomic"]
+__all__ = ["read_json", "replace_file", "write_json_atomic", "write_text_atomic"]
+
+#: Waits between attempts at a refused rename, in seconds (about 1.2 s in all).
+REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2, 0.35, 0.5)
+
+
+def replace_file(source: Path, target: Path) -> None:
+    """``os.replace``, tried again while Windows refuses it for a moment."""
+    for delay in REPLACE_RETRY_DELAYS:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(source, target)
 
 
 def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
@@ -33,7 +54,7 @@ def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
+        replace_file(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
