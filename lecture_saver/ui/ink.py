@@ -100,9 +100,9 @@ TOOL_TIPS = {
 UNDERLINE_COLOUR = QColor(229, 38, 46)
 PEN_COLOUR = UNDERLINE_COLOUR
 HIGHLIGHT_COLOUR = QColor(255, 214, 0, 105)
-MEMO_TEXT_COLOUR = QColor(27, 29, 34)
-MEMO_FILL = QColor(255, 246, 191, 242)
-MEMO_BORDER = QColor(214, 178, 62)
+#: A memo is just text on the picture, no box: in the pen's red, so it never
+#: reads as part of the slide.
+MEMO_TEXT_COLOUR = PEN_COLOUR
 
 #: Sizes, as fractions of the picture's height (width for the memo's wrap).
 UNDERLINE_WIDTH = 0.0045
@@ -159,7 +159,8 @@ def underline_width(rect: QRectF) -> float:
 def memo_font(rect: QRectF) -> QFont:
     font = QFont()
     font.setPixelSize(max(9, round(rect.height() * MEMO_TEXT_SIZE)))
-    font.setWeight(QFont.Weight.Medium)
+    # Without a box behind it, a little weight keeps it readable on video.
+    font.setWeight(QFont.Weight.DemiBold)
     return font
 
 
@@ -289,12 +290,9 @@ def stroke_path(points: Sequence[QPointF]) -> QPainterPath:
 
 
 def _paint_memo(painter: QPainter, mark: Mark, rect: QRectF, font: QFont) -> None:
+    # The box only places and wraps the text, and is what a click hits.
     box = memo_box(mark, rect)
     pad = _memo_padding(font)
-    painter.setPen(QPen(MEMO_BORDER, max(1.0, rect.height() * 0.0012)))
-    painter.setBrush(MEMO_FILL)
-    radius = pad * 0.8
-    painter.drawRoundedRect(box, radius, radius)
     painter.setFont(font)
     painter.setPen(MEMO_TEXT_COLOUR)
     painter.drawText(
@@ -357,12 +355,12 @@ def tool_icon(tool: str) -> QIcon:
         painter.setPen(QPen(ink, 1.6, *round_cap))
         painter.drawLine(QPointF(5, 10.25), QPointF(15, 10.25))
     elif tool == TOOL_MEMO:
-        painter.setPen(QPen(MEMO_BORDER, 1.3))
-        painter.setBrush(MEMO_FILL)
-        painter.drawRoundedRect(QRectF(2.5, 3.5, 15, 13), 2, 2)
+        # A "T": text typed straight onto the picture, in the memo's red.
+        painter.setPen(QPen(MEMO_TEXT_COLOUR, 2.2, *round_cap))
+        painter.drawLine(QPointF(4.5, 4.5), QPointF(15.5, 4.5))
+        painter.drawLine(QPointF(10, 4.5), QPointF(10, 16))
         painter.setPen(QPen(ink, 1.4, *round_cap))
-        painter.drawLine(QPointF(5.5, 8), QPointF(14.5, 8))
-        painter.drawLine(QPointF(5.5, 12), QPointF(11.5, 12))
+        painter.drawLine(QPointF(7.5, 16), QPointF(12.5, 16))
     else:
         painter.setPen(QPen(ink, 1.4, *round_cap))
         painter.drawLine(QPointF(3, 17.5), QPointF(17, 17.5))
@@ -749,9 +747,15 @@ class InkCanvas(QWidget):
         editor = _MemoEditor(self)
         editor.setFont(memo_font(rect))
         editor.setPlaceholderText("Type a memo, Enter to keep it")
+        # Typed as it will look: no box, the memo's own colour, size and
+        # weight - set here too, as a style sheet would otherwise put back the
+        # application's font.
+        font = memo_font(rect)
+        pad = round(_memo_padding(font))
         editor.setStyleSheet(
-            f"QLineEdit {{ background: {MEMO_FILL.name()}; color: {MEMO_TEXT_COLOUR.name()};"
-            f" border: 1px solid {theme.ACCENT}; border-radius: 4px; padding: 2px 4px; }}"
+            f"QLineEdit, QLineEdit:focus {{ background: transparent; border: none;"
+            f" color: {MEMO_TEXT_COLOUR.name()}; padding: {pad}px {max(0, pad - 2)}px;"
+            f" font-size: {font.pixelSize()}px; font-weight: {int(font.weight())}; }}"
         )
         editor.setText(text)
         editor.committed.connect(self.commit_memo)
