@@ -119,7 +119,9 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    the video) and mark the picture as it keeps playing - at any speed, 2x
    included; Space still pauses. The pen button holds a **free pen**,
    **underline**, **highlight** and an **eraser** (keys 1-4; its arrow picks
-   one), and beside it is a typed **memo** (5). Press **S** (or *Screenshot*)
+   one), and beside it is a typed **memo** (5) - double-click one to change
+   it later. The dot beside them picks the **ink**: red, blue, black, green,
+   orange, purple or white. Press **S** (or *Screenshot*)
    to keep the picture on screen with your marks. *Screenshots* opens them
    beside the video: change any screenshot's marks there, and *Play from*
    replays the stretch you were marking. *Export PDF* at the top of the panel
@@ -384,8 +386,13 @@ to one language for the whole recording.
   snaps level when it is nearly level; **highlight** (3), a dragged box, or a
   drag along one line of text to band that line; **eraser** (4). Pressing the
   button goes back to the kind used last, its arrow picks another. **Memo** (5)
-  is typed where you click: Enter keeps it, Esc drops it, clicking a memo
-  changes it. Right-click removes a mark with any tool
+  is typed where you click as plain text, no box: Enter keeps it, Esc drops
+  it, and a memo kept is changed by clicking it with the memo tool or
+  double-clicking it with any. Right-click removes a mark with any tool
+- **Ink**: the dot after the memo button colours new pen strokes, underlines
+  and memos - red, blue, black, green, orange, purple or white (for dark
+  slides). Each mark keeps its own; changing the ink while typing a memo
+  recolours that memo. Highlights stay yellow
 - **Screenshot** (S) keeps the frame on screen at the video's full resolution,
   with the marks that are showing. Saving happens in the background - about
   13 ms of the interface's time - so taking one at 2x does not stutter

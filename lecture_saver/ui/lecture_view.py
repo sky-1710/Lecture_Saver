@@ -365,7 +365,8 @@ class LectureView(QWidget):
 
         # --- beside the video: screenshots, when open ---
         self._capture_panel = CapturePanel()
-        self._capture_panel.setMinimumWidth(260)
+        # Room for the drawing tools in one row: pen, memo, ink, undo, redo, Clear all.
+        self._capture_panel.setMinimumWidth(300)
         self._capture_panel.setVisible(False)
 
         # --- right: transcription + transcript ---

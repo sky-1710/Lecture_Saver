@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import replace
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, QSizeF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -92,16 +93,30 @@ TOOL_TIPS = {
     TOOL_HIGHLIGHT: "Drag a box over what matters - or drag along one line of text to "
                     "highlight that line.",
     TOOL_MEMO: "Click where the note goes and type; Enter keeps it, Esc drops it.\n"
-               "Click a memo with this tool to change it.",
+               "To change a memo later, click it with this tool - or double-click it "
+               "with any tool.",
     TOOL_ERASER: "Click or drag over marks to remove them.\n"
                  "Right-click removes a mark whichever tool is chosen.",
 }
 
-UNDERLINE_COLOUR = QColor(229, 38, 46)
+#: The inks a pen stroke, an underline and a memo can be in, as the colour
+#: button offers them. Red is the default, and what every mark drawn before
+#: there was a choice is shown in. White is for dark slides.
+INKS = (
+    ("Red", "#e5262e"),
+    ("Blue", "#1f5fd6"),
+    ("Black", "#1b1d22"),
+    ("Green", "#178a3e"),
+    ("Orange", "#f07a12"),
+    ("Purple", "#7b3fc4"),
+    ("White", "#ffffff"),
+)
+DEFAULT_INK = INKS[0][1]
+UNDERLINE_COLOUR = QColor(DEFAULT_INK)
 PEN_COLOUR = UNDERLINE_COLOUR
 HIGHLIGHT_COLOUR = QColor(255, 214, 0, 105)
-#: A memo is just text on the picture, no box: in the pen's red, so it never
-#: reads as part of the slide.
+#: A memo is just text on the picture, no box, in an ink like the pen's -
+#: red unless another is chosen, so it never reads as part of the slide.
 MEMO_TEXT_COLOUR = PEN_COLOUR
 
 #: Sizes, as fractions of the picture's height (width for the memo's wrap).
@@ -150,6 +165,16 @@ def to_unit(point: QPointF, rect: QRectF) -> tuple[float, float]:
 
 def to_pixels(x: float, y: float, rect: QRectF) -> QPointF:
     return QPointF(rect.x() + x * rect.width(), rect.y() + y * rect.height())
+
+
+def ink_of(mark: Mark) -> QColor:
+    """What ``mark`` is drawn in; a highlight's yellow is not an ink."""
+    return QColor(mark.colour or DEFAULT_INK)
+
+
+def stored_ink(ink: str) -> str:
+    """How an ink is kept on a mark: the default is left unsaid."""
+    return "" if ink == DEFAULT_INK else ink
 
 
 def underline_width(rect: QRectF) -> float:
@@ -257,9 +282,11 @@ def paint_marks(painter: QPainter, marks: Sequence[Mark], rect: QRectF, *,
             painter.drawRect(QRectF(to_pixels(mark.x1, mark.y1, rect),
                                     to_pixels(mark.x2, mark.y2, rect)))
         elif mark.kind == UNDERLINE:
+            line.setColor(ink_of(mark))
             painter.setPen(line)
             painter.drawLine(to_pixels(mark.x1, mark.y1, rect), to_pixels(mark.x2, mark.y2, rect))
         elif mark.kind == PEN:
+            line.setColor(ink_of(mark))
             painter.setPen(line)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(stroke_path([to_pixels(x, y, rect) for x, y in mark.points]))
@@ -294,7 +321,7 @@ def _paint_memo(painter: QPainter, mark: Mark, rect: QRectF, font: QFont) -> Non
     box = memo_box(mark, rect)
     pad = _memo_padding(font)
     painter.setFont(font)
-    painter.setPen(MEMO_TEXT_COLOUR)
+    painter.setPen(ink_of(mark))
     painter.drawText(
         box.adjusted(pad, pad, -pad, -pad),
         int(Qt.AlignmentFlag.AlignLeft) | int(Qt.TextFlag.TextWordWrap),
@@ -370,6 +397,21 @@ def tool_icon(tool: str) -> QIcon:
         painter.drawRoundedRect(QRectF(-6.5, -3.5, 13, 7), 1.5, 1.5)
         painter.setBrush(QColor(theme.BORDER_STRONG))
         painter.drawRoundedRect(QRectF(-6.5, -3.5, 5, 7), 1.5, 1.5)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def ink_icon(ink: str) -> QIcon:
+    """A dot of ``ink``, ringed so that white shows on a white menu."""
+    scale = 2
+    pixmap = QPixmap(ICON_SIZE * scale, ICON_SIZE * scale)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(QPen(QColor(theme.BORDER_HOVER), 1.2))
+    painter.setBrush(QColor(ink))
+    painter.drawEllipse(QRectF(4, 4, 12, 12))
     painter.end()
     return QIcon(pixmap)
 
@@ -452,6 +494,8 @@ class InkCanvas(QWidget):
     #: Marks were loaded from elsewhere; the history starts again.
     marksLoaded = Signal()
     toolChanged = Signal(str)
+    #: The ink new marks are drawn in changed; carries ``#rrggbb``.
+    inkChanged = Signal(str)
     #: Esc with nothing in progress - the place to leave drawing.
     escapePressed = Signal()
 
@@ -459,6 +503,9 @@ class InkCanvas(QWidget):
         super().__init__(parent)
         self._sheet = MarkSheet()
         self._tool = TOOL_PEN
+        self._ink = DEFAULT_INK
+        #: The ink of the memo being typed: its own when an old one is changed.
+        self._memo_ink = DEFAULT_INK
         self._editable = True
         self._drag_from: QPointF | None = None
         #: The pen stroke being drawn, in pixels on screen.
@@ -550,6 +597,21 @@ class InkCanvas(QWidget):
         self.toolChanged.emit(tool)
 
     @property
+    def ink(self) -> str:
+        return self._ink
+
+    def set_ink(self, ink: str) -> None:
+        """Draw new marks in ``ink`` (``#rrggbb``). A memo being typed takes it too."""
+        ink = QColor(ink).name()
+        if ink == self._ink:
+            return
+        self._ink = ink
+        if self._memo_editor is not None:
+            self._memo_ink = ink
+            self._style_memo_editor()
+        self.inkChanged.emit(ink)
+
+    @property
     def editable(self) -> bool:
         return self._editable
 
@@ -603,7 +665,7 @@ class InkCanvas(QWidget):
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setClipRect(rect)
-            pen = QPen(PEN_COLOUR, underline_width(rect), Qt.PenStyle.SolidLine,
+            pen = QPen(QColor(self._ink), underline_width(rect), Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
             painter.drawPath(stroke_path(self._stroke))
@@ -664,6 +726,26 @@ class InkCanvas(QWidget):
         else:
             super().mouseMoveEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
+        """A memo double-clicked is opened to be changed, whichever tool is chosen."""
+        rect = self.picture_rect()
+        if (
+            self._editable and not rect.isEmpty()
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._tool != TOOL_ERASER
+        ):
+            index = hit_test(self._sheet.marks, event.position(), rect)
+            mark = self._sheet.marks[index] if index >= 0 else None
+            if mark is not None and mark.kind == MEMO:
+                # The first click of the two may have begun a stroke or a drag.
+                self._stroke = None
+                self._drag_from = None
+                if not (self._memo_editor is not None and self._memo_index == index):
+                    self.open_memo(mark.x1, mark.y1, mark.text, index=index)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
         if self._stroke is not None and event.button() == Qt.MouseButton.LeftButton:
             mark = self._stroke_mark(self.picture_rect())
@@ -697,7 +779,8 @@ class InkCanvas(QWidget):
         if length < MIN_DRAG_PX:
             return None
         kept = simplify_path([(p.x(), p.y()) for p in stroke], PEN_TOLERANCE_PX)
-        return Mark.pen(to_unit(QPointF(x, y), rect) for x, y in kept)
+        return Mark.pen((to_unit(QPointF(x, y), rect) for x, y in kept),
+                        stored_ink(self._ink))
 
     def _drag_mark(self, rect: QRectF) -> Mark | None:
         """The mark the drag in progress would make, or ``None``."""
@@ -712,7 +795,7 @@ class InkCanvas(QWidget):
         if self._tool == TOOL_UNDERLINE:
             if abs(dy) <= abs(dx) * LEVEL_SNAP:
                 y2 = y1
-            return Mark.underline(x1, y1, x2, y2)
+            return Mark.underline(x1, y1, x2, y2, stored_ink(self._ink))
         if self._tool == TOOL_HIGHLIGHT:
             if abs(dy) < LINE_HIGHLIGHT_BELOW_PX:
                 # Dragged along a line of text: a band that covers the line.
@@ -744,27 +827,38 @@ class InkCanvas(QWidget):
             return
         self._memo_at = (x, y)
         self._memo_index = index
+        marks = self._sheet.marks
+        self._memo_ink = (
+            ink_of(marks[index]).name() if 0 <= index < len(marks) else self._ink
+        )
         editor = _MemoEditor(self)
         editor.setFont(memo_font(rect))
         editor.setPlaceholderText("Type a memo, Enter to keep it")
-        # Typed as it will look: no box, the memo's own colour, size and
-        # weight - set here too, as a style sheet would otherwise put back the
-        # application's font.
-        font = memo_font(rect)
-        pad = round(_memo_padding(font))
-        editor.setStyleSheet(
-            f"QLineEdit, QLineEdit:focus {{ background: transparent; border: none;"
-            f" color: {MEMO_TEXT_COLOUR.name()}; padding: {pad}px {max(0, pad - 2)}px;"
-            f" font-size: {font.pixelSize()}px; font-weight: {int(font.weight())}; }}"
-        )
         editor.setText(text)
         editor.committed.connect(self.commit_memo)
         editor.cancelled.connect(self.cancel_memo)
         self._memo_editor = editor
+        self._style_memo_editor()
         self._place_memo_editor()
         editor.show()
         editor.setFocus(Qt.FocusReason.OtherFocusReason)
         self.update()
+
+    def _style_memo_editor(self) -> None:
+        """Typed as it will look: no box, the memo's own ink, size and weight -
+        set in the style sheet too, which would otherwise put back the
+        application's font."""
+        editor = self._memo_editor
+        rect = self.picture_rect()
+        if editor is None or rect.isEmpty():
+            return
+        font = memo_font(rect)
+        pad = round(_memo_padding(font))
+        editor.setStyleSheet(
+            f"QLineEdit, QLineEdit:focus {{ background: transparent; border: none;"
+            f" color: {self._memo_ink}; padding: {pad}px {max(0, pad - 2)}px;"
+            f" font-size: {font.pixelSize()}px; font-weight: {int(font.weight())}; }}"
+        )
 
     def _place_memo_editor(self) -> None:
         editor = self._memo_editor
@@ -792,14 +886,15 @@ class InkCanvas(QWidget):
                 return
             if text:
                 existing = self._sheet.marks[index]
-                if existing.text != text:
-                    self._sheet.replace(index, existing.with_text(text))
+                changed = replace(existing, text=text, colour=stored_ink(self._memo_ink))
+                if changed != existing:
+                    self._sheet.replace(index, changed)
                     self._changed(True)
             else:
                 self._sheet.remove(index)
                 self._changed(True)
         elif text:
-            self._sheet.add(Mark.memo(*self._memo_at, text))
+            self._sheet.add(Mark.memo(*self._memo_at, text, stored_ink(self._memo_ink)))
             self._changed(True, added=True)
 
     def cancel_memo(self) -> None:
@@ -927,6 +1022,26 @@ class InkToolBar(QWidget):
         self._memo_button.setToolTip(self._tip(TOOL_MEMO))
         self._memo_button.clicked.connect(lambda: self._choose(TOOL_MEMO))
 
+        self._ink_menu = QMenu(self)
+        inks = QActionGroup(self)
+        inks.setExclusive(True)
+        self._ink_actions: dict[str, QAction] = {}
+        for name, ink in INKS:
+            action = QAction(ink_icon(ink), name, self._ink_menu)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _=False, i=ink: canvas.set_ink(i))
+            inks.addAction(action)
+            self._ink_menu.addAction(action)
+            self._ink_actions[ink] = action
+        self._ink_button = QToolButton()
+        self._ink_button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+        self._ink_button.setMenu(self._ink_menu)
+        self._ink_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._ink_button.setToolTip(
+            "Ink colour of the pen, the underline and memos.\n"
+            "Marks already drawn keep theirs; highlights stay yellow."
+        )
+
         self._undo_button = QToolButton()
         self._undo_button.setIcon(history_icon(redo=False))
         self._undo_button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
@@ -946,6 +1061,7 @@ class InkToolBar(QWidget):
         layout.setSpacing(2)
         layout.addWidget(self._pen_button)
         layout.addWidget(self._memo_button)
+        layout.addWidget(self._ink_button)
         layout.addSpacing(6)
         for button in (self._undo_button, self._redo_button, self._clear_button):
             layout.addWidget(button)
@@ -955,9 +1071,11 @@ class InkToolBar(QWidget):
         self._redo_button.clicked.connect(canvas.redo)
         self._clear_button.clicked.connect(canvas.clear_marks)
         canvas.toolChanged.connect(self._show_tool)
+        canvas.inkChanged.connect(self._show_ink)
         canvas.marksChanged.connect(self.refresh)
         canvas.marksLoaded.connect(self.refresh)
         self._show_tool(canvas.tool)
+        self._show_ink(canvas.ink)
         self.refresh()
 
     @staticmethod
@@ -986,6 +1104,21 @@ class InkToolBar(QWidget):
 
     def pen_action(self, tool: str) -> QAction:
         return self._pen_actions[tool]
+
+    @property
+    def ink_button(self) -> QToolButton:
+        return self._ink_button
+
+    def ink_action(self, ink: str) -> QAction:
+        return self._ink_actions[ink]
+
+    def _show_ink(self, ink: str) -> None:
+        self._ink_button.setIcon(ink_icon(ink))
+        action = self._ink_actions.get(ink)
+        if action is not None:
+            action.setChecked(True)
+        name = next((n for n, i in INKS if i == ink), ink)
+        self._ink_button.setAccessibleName(f"Ink: {name}")
 
     @property
     def clear_button(self) -> QToolButton:

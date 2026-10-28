@@ -58,6 +58,27 @@ class TestMark:
         data = Mark.pen([(0.1, 0.2), (0.3, 0.4)]).to_dict()
         assert data == {"kind": PEN, "points": [[0.1, 0.2], [0.3, 0.4]]}
 
+    def test_a_colour_is_kept_and_saved(self):
+        mark = Mark.pen([(0.1, 0.1), (0.2, 0.2)], "#1F5FD6")
+        assert mark.colour == "#1f5fd6"
+        assert Mark.from_dict(mark.to_dict()) == mark
+        assert Mark.memo(0.1, 0.1, "x", "#178a3e").to_dict()["colour"] == "#178a3e"
+
+    def test_the_default_ink_is_left_unsaid(self):
+        # Marks saved before colours could be chosen load as the default.
+        assert "colour" not in Mark.underline(0, 0.5, 1, 0.5).to_dict()
+        data = {"kind": "underline", "x1": 0, "y1": 0.5, "x2": 1, "y2": 0.5}
+        assert Mark.from_dict(data).colour == ""
+
+    @pytest.mark.parametrize("colour", ["red", "#12345", "#gggggg", 7, None])
+    def test_what_is_not_a_colour_is_the_default(self, colour):
+        data = {"kind": "memo", "x": 0.1, "y": 0.1, "text": "x", "colour": colour}
+        assert Mark.from_dict(data).colour == ""
+
+    def test_changing_a_memo_keeps_its_colour(self):
+        memo = Mark.memo(0.1, 0.1, "draft", "#7b3fc4")
+        assert memo.with_text("final").colour == "#7b3fc4"
+
     def test_a_memo_is_stored_with_its_text(self):
         data = Mark.memo(0.4, 0.5, "시험 범위").to_dict()
         assert data == {"kind": MEMO, "x": 0.4, "y": 0.5, "text": "시험 범위"}

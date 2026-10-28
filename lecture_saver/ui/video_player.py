@@ -63,7 +63,7 @@ from ..core.captures import Mark, marking_start
 from ..core.timecode import format_clock
 from . import theme
 from .ink import ICON_SIZE, TOOL_LABELS, TOOLS, InkToolBar, draw_icon
-from .theme import Role, key_hints, set_flag, set_role
+from .theme import HintLabel, Role, key_hints, set_flag, set_role
 from .video_canvas import VideoCanvas
 
 log = logging.getLogger(__name__)
@@ -122,6 +122,7 @@ DRAWING_KEYS = (
     *((str(number), TOOL_LABELS[tool].lower()) for number, tool in enumerate(TOOLS, start=1)),
     ("Ctrl+Z", "undo"),
     ("S", "screenshot"),
+    ("Double-click", "change a memo"),
     ("D / Esc", "stop drawing"),
     ("Space", "play / pause"),
     ("← / →", "1 s back / forward"),
@@ -263,10 +264,7 @@ class VideoPlayer(QWidget):
         self._ink_bar = InkToolBar(self._canvas, keys=True)
         self._ink_bar.setVisible(False)
         # The keys, always in sight: none of them has a menu to be found in.
-        self._keys_label = QLabel()
-        self._keys_label.setTextFormat(Qt.TextFormat.RichText)
-        self._keys_label.setWordWrap(True)
-        set_role(self._keys_label, Role.SUBTLE)
+        self._keys_label = HintLabel()
         self._keys_label.setVisible(False)
         self._show_keys()
 

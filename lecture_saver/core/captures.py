@@ -21,8 +21,9 @@ read the same records.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,14 @@ def _unit(value: object) -> float | None:
     return min(1.0, max(0.0, float(value)))
 
 
+_HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def _colour(value: object) -> str:
+    """``value`` as ``#rrggbb``, or "" - the drawing's default - if it is none."""
+    return value.lower() if isinstance(value, str) and _HEX_COLOUR.fullmatch(value) else ""
+
+
 def _number(value: object, default: float = 0.0) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
@@ -95,20 +104,24 @@ class Mark:
     text: str = ""
     #: The points a pen stroke passes through, in order; empty otherwise.
     points: tuple[Point, ...] = ()
+    #: The ink, as ``#rrggbb``; "" is the default red - and what every mark
+    #: drawn before colours could be chosen has. Highlights are always yellow.
+    colour: str = ""
 
     @classmethod
-    def pen(cls, points: Iterable[Point]) -> Mark:
+    def pen(cls, points: Iterable[Point], colour: str = "") -> Mark:
         """A freehand stroke through ``points``."""
         kept = tuple((min(1.0, max(0.0, float(x))), min(1.0, max(0.0, float(y))))
                      for x, y in points)
         if not kept:
             raise ValueError("A pen stroke needs at least one point.")
         xs, ys = [x for x, _ in kept], [y for _, y in kept]
-        return cls(PEN, min(xs), min(ys), max(xs), max(ys), points=kept)
+        return cls(PEN, min(xs), min(ys), max(xs), max(ys), points=kept,
+                   colour=_colour(colour))
 
     @classmethod
-    def underline(cls, x1: float, y1: float, x2: float, y2: float) -> Mark:
-        return cls(UNDERLINE, *_clamped(x1, y1, x2, y2))
+    def underline(cls, x1: float, y1: float, x2: float, y2: float, colour: str = "") -> Mark:
+        return cls(UNDERLINE, *_clamped(x1, y1, x2, y2), colour=_colour(colour))
 
     @classmethod
     def highlight(cls, x1: float, y1: float, x2: float, y2: float) -> Mark:
@@ -117,25 +130,30 @@ class Mark:
         return cls(HIGHLIGHT, left, top, right, bottom)
 
     @classmethod
-    def memo(cls, x: float, y: float, text: str) -> Mark:
+    def memo(cls, x: float, y: float, text: str, colour: str = "") -> Mark:
         left, top, _, _ = _clamped(x, y, x, y)
-        return cls(MEMO, left, top, left, top, text)
+        return cls(MEMO, left, top, left, top, text, colour=_colour(colour))
 
     def with_text(self, text: str) -> Mark:
-        return Mark(self.kind, self.x1, self.y1, self.x2, self.y2, text, self.points)
+        return replace(self, text=text)
 
     def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any]
         if self.kind == PEN:
-            return {"kind": PEN,
+            data = {"kind": PEN,
                     "points": [[round(x, 5), round(y, 5)] for x, y in self.points]}
-        if self.kind == MEMO:
-            return {"kind": MEMO, "x": round(self.x1, 5), "y": round(self.y1, 5),
+        elif self.kind == MEMO:
+            data = {"kind": MEMO, "x": round(self.x1, 5), "y": round(self.y1, 5),
                     "text": self.text}
-        return {
-            "kind": self.kind,
-            "x1": round(self.x1, 5), "y1": round(self.y1, 5),
-            "x2": round(self.x2, 5), "y2": round(self.y2, 5),
-        }
+        else:
+            data = {
+                "kind": self.kind,
+                "x1": round(self.x1, 5), "y1": round(self.y1, 5),
+                "x2": round(self.x2, 5), "y2": round(self.y2, 5),
+            }
+        if self.colour:
+            data["colour"] = self.colour
+        return data
 
     @classmethod
     def from_dict(cls, data: object) -> Mark | None:
@@ -143,6 +161,7 @@ class Mark:
         if not isinstance(data, dict):
             return None
         kind = data.get("kind")
+        colour = _colour(data.get("colour"))
         if kind == PEN:
             raw = data.get("points")
             if not isinstance(raw, list):
@@ -155,20 +174,20 @@ class Mark:
                 if x is None or y is None:
                     return None
                 points.append((x, y))
-            return cls.pen(points) if len(points) >= 2 else None
+            return cls.pen(points, colour) if len(points) >= 2 else None
         if kind == MEMO:
             x, y = _unit(data.get("x")), _unit(data.get("y"))
             text = data.get("text")
             if x is None or y is None or not isinstance(text, str) or not text.strip():
                 return None
-            return cls.memo(x, y, text)
+            return cls.memo(x, y, text, colour)
         if kind not in (UNDERLINE, HIGHLIGHT):
             return None
         corners = [_unit(data.get(key)) for key in ("x1", "y1", "x2", "y2")]
         if any(c is None for c in corners):
             return None
         x1, y1, x2, y2 = (float(c) for c in corners)  # type: ignore[arg-type]
-        return cls.underline(x1, y1, x2, y2) if kind == UNDERLINE else cls.highlight(
+        return cls.underline(x1, y1, x2, y2, colour) if kind == UNDERLINE else cls.highlight(
             x1, y1, x2, y2
         )
 

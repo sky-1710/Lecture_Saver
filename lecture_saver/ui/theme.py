@@ -27,8 +27,9 @@ from PySide6.QtGui import (
     QPainter,
     QPalette,
     QPixmap,
+    QResizeEvent,
 )
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 __all__ = [
     "ACCENT",
@@ -45,6 +46,7 @@ __all__ = [
     "app_icon",
     "apply_theme",
     "set_flag",
+    "HintLabel",
     "key_hints",
     "set_role",
     "stylesheet",
@@ -124,6 +126,34 @@ def set_flag(widget: QWidget, name: str, value: object = True) -> None:
     """Set a style property the stylesheet selects on - ``card``, ``banner``."""
     widget.setProperty(name, value)
     repolish(widget)
+
+
+class HintLabel(QLabel):
+    """A line of :func:`key_hints` that wraps, and keeps the room it wraps into.
+
+    A word-wrapped label inside a splitter is only given the height of its
+    first guess at a line count, and the lines past it were cut off; this one
+    claims the height its lines need at whatever width it is given.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setWordWrap(True)
+        set_role(self, Role.SUBTLE)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt's name
+        super().setText(text)
+        self._claim_height()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt's name
+        super().resizeEvent(event)
+        self._claim_height()
+
+    def _claim_height(self) -> None:
+        needed = self.heightForWidth(max(1, self.width()))
+        if needed > 0 and needed != self.minimumHeight():
+            self.setMinimumHeight(needed)
 
 
 def key_hints(keys: Sequence[tuple[str, str]]) -> str:

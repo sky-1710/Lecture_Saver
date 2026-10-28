@@ -218,6 +218,41 @@ class TestDrawing:
         QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
         assert canvas.marks == ()
 
+    @pytest.mark.parametrize("tool", [ink.TOOL_PEN, ink.TOOL_UNDERLINE, ink.TOOL_HIGHLIGHT])
+    def test_a_memo_kept_with_enter_can_be_changed_by_double_clicking_it(self, canvas, tool):
+        canvas.set_tool(ink.TOOL_MEMO)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(400, 90))
+        QTest.keyClicks(canvas._memo_editor, "fisrt")
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert not canvas.is_typing
+
+        canvas.set_tool(tool)
+        QTest.mouseDClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(410, 98))
+        assert canvas.is_typing and canvas._memo_editor.text() == "fisrt"
+        canvas._memo_editor.setText("first")
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        # Changed in place - and the double-click drew nothing of its own.
+        assert canvas.marks == (Mark.memo(0.5, 0.2, "first"),)
+        assert canvas.tool == tool
+
+    def test_double_clicking_keeps_the_memos_own_ink(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "green", "#178a3e")])
+        canvas.set_ink("#1f5fd6")
+        QTest.mouseDClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(410, 98))
+        canvas._memo_editor.setText("still green")
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert canvas.marks == (Mark.memo(0.5, 0.2, "still green", "#178a3e"),)
+
+    def test_double_clicking_nothing_opens_nothing(self, canvas):
+        QTest.mouseDClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(200, 300))
+        assert not canvas.is_typing and canvas.marks == ()
+
+    def test_the_eraser_does_not_open_a_memo_it_was_double_clicked_on(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "gone")])
+        canvas.set_tool(ink.TOOL_ERASER)
+        QTest.mouseDClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(410, 98))
+        assert not canvas.is_typing and canvas.marks == ()
+
     def test_clicking_elsewhere_keeps_what_was_typed(self, canvas):
         canvas.set_tool(ink.TOOL_MEMO)
         QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(100, 90))
@@ -294,6 +329,76 @@ class TestDrawing:
         canvas.set_marks([Mark.underline(0, 0.5, 1, 0.5)])
         assert edits == []
         assert not canvas.sheet.can_undo
+
+
+class TestInk:
+    BLUE = "#1f5fd6"
+
+    def test_red_to_start_with(self, canvas):
+        assert canvas.ink == ink.DEFAULT_INK
+
+    def test_new_marks_are_drawn_in_the_ink_chosen(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        bar.ink_action(self.BLUE).trigger()
+        assert canvas.ink == self.BLUE
+        drag(canvas, QPoint(100, 100), QPoint(300, 160))  # free pen
+        canvas.set_tool(ink.TOOL_UNDERLINE)
+        drag(canvas, QPoint(100, 300), QPoint(500, 300))
+        canvas.set_tool(ink.TOOL_HIGHLIGHT)
+        drag(canvas, QPoint(100, 380), QPoint(500, 420))
+        canvas.set_tool(ink.TOOL_MEMO)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(600, 60))
+        canvas._memo_editor.setText("blue note")
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert [(m.kind, m.colour) for m in canvas.marks] == [
+            (PEN, self.BLUE), (UNDERLINE, self.BLUE), (HIGHLIGHT, ""), (MEMO, self.BLUE),
+        ]
+
+    def test_marks_already_drawn_keep_their_ink(self, canvas):
+        canvas.set_marks([Mark.underline(0, 0.5, 1, 0.5)])
+        canvas.set_ink(self.BLUE)
+        assert canvas.marks[0].colour == ""
+
+    def test_the_default_ink_is_stored_as_the_default(self, canvas):
+        drag(canvas, QPoint(100, 100), QPoint(300, 160))
+        assert canvas.marks[0].colour == ""
+
+    def test_a_memo_changed_keeps_its_ink(self, canvas):
+        canvas.set_marks([Mark.memo(0.5, 0.2, "draft", "#178a3e")])
+        canvas.set_ink(self.BLUE)
+        canvas.set_tool(ink.TOOL_MEMO)
+        # Clicking it takes the ink it has, not the one chosen for new marks...
+        canvas.set_ink(ink.DEFAULT_INK)
+        canvas.set_ink(self.BLUE)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(410, 98))
+        canvas._memo_editor.setText("final")
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert canvas.marks[0] == Mark.memo(0.5, 0.2, "final", "#178a3e")
+
+    def test_choosing_an_ink_while_typing_recolours_that_memo(self, canvas):
+        canvas.set_tool(ink.TOOL_MEMO)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(600, 60))
+        canvas._memo_editor.setText("note")
+        canvas.set_ink(self.BLUE)
+        assert self.BLUE in canvas._memo_editor.styleSheet()
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert canvas.marks[0].colour == self.BLUE
+
+    def test_the_button_shows_the_ink(self, canvas):
+        bar = ink.InkToolBar(canvas)
+        assert bar.ink_button.accessibleName() == "Ink: Red"
+        canvas.set_ink(self.BLUE)
+        assert bar.ink_button.accessibleName() == "Ink: Blue"
+        assert bar.ink_action(self.BLUE).isChecked()
+        names = [a.text() for a in bar.ink_button.menu().actions()]
+        assert names == ["Red", "Blue", "Black", "Green", "Orange", "Purple", "White"]
+
+    def test_the_ink_is_what_gets_printed(self, qapp):
+        marked = ink.render_marked(
+            picture(320, 180), [Mark.underline(0.1, 0.5, 0.9, 0.5, self.BLUE)]
+        )
+        colour = QColor(marked.pixel(160, 90))
+        assert colour.blue() > 150 and colour.red() < 100
 
 
 class TestRendering:
@@ -701,8 +806,8 @@ class TestCapturePanel:
     def test_the_panel_says_its_keys(self, panel):
         panel.add_screenshot(shot(1.0))
         assert panel._keys_label.isVisible()
-        for key in ("Ctrl+Z", "Delete", "Double-click"):
-            assert f">{key}</b>" in panel._keys_label.text()
+        for key in ("Ctrl+Z", "Delete", "Double-click a memo"):
+            assert f">{key}</b>".replace(" ", "&nbsp;") in panel._keys_label.text()
 
     def test_the_count_is_announced(self, panel):
         counts = []
