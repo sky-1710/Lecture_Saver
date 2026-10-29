@@ -151,6 +151,20 @@ class Settings:
     def translation_engine(self, value: str) -> None:
         self.set("translation_engine", str(value))
 
+    # -- reading -----------------------------------------------------------
+
+    @property
+    def transcript_text_size(self) -> float | None:
+        """Point size of the transcript and its translation; None until chosen."""
+        stored = self._data.get("transcript_text_size")
+        if isinstance(stored, bool) or not isinstance(stored, int | float):
+            return None
+        return float(stored)
+
+    @transcript_text_size.setter
+    def transcript_text_size(self, value: float | None) -> None:
+        self.set("transcript_text_size", value)
+
     # -- transcription defaults --------------------------------------------
 
     def transcription_defaults(self) -> dict[str, Any]:

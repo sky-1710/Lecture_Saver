@@ -306,6 +306,11 @@ to one language for the whole recording.
   notes* label, time range, and only the speech from that slide
 - **Full transcript** tab: the whole lecture, as before. Both tabs show the same
   single transcript
+- **Text size**: the number beside the tabs (8-36 points; type it, use - and +,
+  the arrow keys or the mouse wheel) sets how large the transcript is read -
+  its lines, the Korean under them and the slide's translation below. The
+  times stay as they are, and the size is kept for every lecture. In a narrow
+  pane only the number shows, and in the narrowest none of it
 - Synchronisation: playback crossing a slide change selects that slide in the
   navigator and switches the transcript to it; clicking a slide shows it and
   seeks there; clicking a segment seeks there. Untick *Follow playback* (under

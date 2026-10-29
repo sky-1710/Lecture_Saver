@@ -636,15 +636,43 @@ class TranscriptView(QListView):
 
     def finish_editing(self) -> None:
         """Close an open editor. Its text is already in the store."""
+        editor = self._open_editor()
+        if editor is not None:
+            self.closeEditor(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+
+    def _open_editor(self) -> QWidget | None:
         if not self.is_editing:
-            return
+            return None
         index = self.currentIndex()
         editor = self.indexWidget(index) if index.isValid() else None
         if editor is None:
             focus = self.viewport().focusWidget()
             editor = focus if isinstance(focus, SegmentEditor) else None
+        return editor
+
+    # -- text size ----------------------------------------------------------
+
+    @property
+    def text_size(self) -> float:
+        """Point size of the lines and their translations."""
+        return self.font().pointSizeF()
+
+    def set_text_size(self, points: float) -> None:
+        """Show the lines, and the translations under them, at ``points``.
+
+        The times and the "Ask AI" button keep their size: the gutter is as
+        wide as a time, whatever the text beside it.
+        """
+        if abs(points - self.text_size) < 1e-9:
+            return
+        font = QFont(self.font())
+        font.setPointSizeF(points)
+        self.setFont(font)
+        # A line being typed in grows with the rest, without closing.
+        editor = self._open_editor()
         if editor is not None:
-            self.closeEditor(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+            editor.setFont(font)
+        self.scheduleDelayedItemsLayout()
 
     def _on_text_edited(self, segment_id: str, text: str) -> None:
         self.textEdited.emit(segment_id, text)

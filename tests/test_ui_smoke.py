@@ -1897,6 +1897,101 @@ class TestLineByLineTranslation:
 
 
 # --------------------------------------------------------------------------
+# The size the transcript and its translation are read at
+# --------------------------------------------------------------------------
+
+
+class TestTranscriptTextSize:
+    def _row_height(self, view, row=0):
+        transcript = view._transcript
+        option = QStyleOptionViewItem()
+        option.rect.setWidth(400)
+        option.font = transcript.font()
+        index = transcript.model().index(row, 0)
+        return transcript.itemDelegate().sizeHint(option, index).height()
+
+    def test_the_number_sizes_the_lines_and_their_translations(self, qapp, project_with_slides):
+        from lecture_saver.ui.transcript_view import ROLE_TRANSLATION
+
+        project_with_slides.import_translation(TestLineByLineTranslation.ANSWER)
+        view = LectureView()
+        view.load_project(project_with_slides)
+        view.refresh_translations()
+        assert view._transcript.model().index(0, 0).data(ROLE_TRANSLATION)
+        delegate = view._transcript.itemDelegate()
+        time_size = delegate._time_font.pointSizeF()
+        before = self._row_height(view)
+
+        view._text_size_box.setValue(18)
+
+        assert view.text_size == 18.0
+        assert view._transcript.font().pointSizeF() == 18.0
+        assert view._translation_text.font().pointSizeF() == 18.0
+        # The line and the Korean under it are both larger; the times are not.
+        assert self._row_height(view) > before * 1.5
+        assert delegate._time_font.pointSizeF() == time_size
+
+    def test_minus_and_plus_step_it_by_one(self, qapp):
+        view = LectureView()
+        start = view._text_size_box.value()
+        view._larger_text_button.click()
+        view._larger_text_button.click()
+        assert view.text_size == start + 2
+        view._smaller_text_button.click()
+        assert view.text_size == start + 1
+
+    def test_it_is_kept_for_every_lecture(self, qapp, tmp_path):
+        path = tmp_path / "settings.json"
+        settings = Settings(path)
+        view = LectureView()
+        view.set_settings(settings)
+        assert settings.transcript_text_size is None  # nothing chosen, nothing kept
+        view._text_size_box.setValue(15)
+        assert Settings(path).transcript_text_size == 15.0
+
+        reopened = LectureView()
+        reopened.set_settings(Settings(path))
+        assert reopened.text_size == 15.0
+        assert reopened._text_size_box.value() == 15
+
+    def test_it_stays_within_its_range(self, qapp, tmp_path):
+        from lecture_saver.ui.lecture_view import MAX_TEXT_POINTS, MIN_TEXT_POINTS
+
+        view = LectureView()
+        view.set_text_size(100)
+        assert view.text_size == MAX_TEXT_POINTS
+        view.set_text_size(1)
+        assert view.text_size == MIN_TEXT_POINTS
+
+        path = tmp_path / "settings.json"
+        path.write_text('{"transcript_text_size": "big"}', encoding="utf-8")
+        assert Settings(path).transcript_text_size is None
+
+    def test_a_line_being_typed_in_grows_without_closing(self, editing_view):
+        editor = _open_editor(editing_view, "segment_001")
+        size = editing_view.text_size
+        editing_view._larger_text_button.click()
+        assert editing_view._transcript.is_editing
+        assert editor.font().pointSizeF() == size + 1
+
+    def test_beside_the_tabs_as_much_of_it_as_fits(self, editing_view):
+        view = editing_view
+        assert not view._text_size_bar.isHidden()  # there is a transcript
+        box, plus = view._text_size_box, view._larger_text_button
+        beside_tabs = view._tabs.sizeHint().width() + 14 + 14 + 10
+        view._fit_text_size(beside_tabs + 400)
+        assert not box.isHidden() and not plus.isHidden()
+        view._fit_text_size(beside_tabs + box.sizeHint().width())
+        assert not box.isHidden() and plus.isHidden()
+        view._fit_text_size(beside_tabs + 10)
+        assert box.isHidden()
+
+    def test_only_with_a_transcript(self, qapp):
+        view = LectureView()
+        assert view._text_size_bar.isHidden()
+
+
+# --------------------------------------------------------------------------
 # Space plays and pauses (§12)
 # --------------------------------------------------------------------------
 

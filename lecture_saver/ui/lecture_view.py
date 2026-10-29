@@ -33,9 +33,10 @@ from collections.abc import Callable
 from html import escape as html_escape
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QKeySequence, QPixmap
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QFont, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QFrame,
     QHBoxLayout,
@@ -45,6 +46,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTabBar,
     QTextBrowser,
@@ -70,6 +72,7 @@ from ..transcription.whisper_engine import WhisperOptions
 from .ask_panel import AskPanel
 from .capture_panel import CapturePanel
 from .find_bar import FindBar
+from .ink import ICON_SIZE, size_icon
 from .slide_panel import SlidePanel
 from .theme import Role, set_flag, set_role
 from .transcribe_panel import TranscribePanel
@@ -84,6 +87,9 @@ TAB_SLIDE = 0
 TAB_FULL = 1
 TAB_SEARCH = 2
 PREVIEW_HEIGHT = 150
+#: The sizes the transcript and its translation can be read at, in points.
+MIN_TEXT_POINTS = 8
+MAX_TEXT_POINTS = 36
 
 
 def slide_images(project: Project) -> list[Path]:
@@ -206,6 +212,8 @@ class LectureView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._project: Project | None = None
+        #: The user's settings, once given; the text size is kept there.
+        self._settings: Settings | None = None
         self._syncing = False
         #: Which segments belong to which slide, recomputed from the times
         #: whenever the transcript or the slides are re-bound.
@@ -385,12 +393,42 @@ class LectureView(QWidget):
         self._tabs.setUsesScrollButtons(False)
         self._tabs.setVisible(False)
 
-        transcript_bar = QHBoxLayout()
-        transcript_bar.setContentsMargins(14, 10, 14, 2)
-        transcript_bar.setSpacing(10)
-        transcript_bar.addWidget(self._transcript_header)
-        transcript_bar.addWidget(self._tabs)
-        transcript_bar.addStretch(1)
+        # The size the lines and their translations are read at, as a number:
+        # a box between - and +, like the memo size under the video. Beside
+        # the tabs, as much of it as fits (see _fit_text_size).
+        self._text_size_icon = QLabel()
+        self._text_size_icon.setPixmap(size_icon().pixmap(QSize(ICON_SIZE, ICON_SIZE)))
+        self._text_size_box = QSpinBox()
+        self._text_size_box.setRange(MIN_TEXT_POINTS, MAX_TEXT_POINTS)
+        self._text_size_box.setAccessibleName("Transcript text size")
+        self._text_size_box.setToolTip(
+            "Size of the transcript and its translation, in points - type a "
+            "number, or use - and +, the arrow keys or the wheel.\n"
+            "Kept for every lecture."
+        )
+        self._text_size_box.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self._text_size_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._text_size_box.setFixedWidth(44)
+        self._smaller_text_button = self._text_step_button("−", "Smaller text", -1)
+        self._larger_text_button = self._text_step_button("+", "Larger text", 1)
+        self._text_size_bar = QWidget()
+        self._text_size_layout = QHBoxLayout(self._text_size_bar)
+        self._text_size_layout.setContentsMargins(0, 0, 0, 0)
+        self._text_size_layout.setSpacing(2)
+        for widget in (
+            self._text_size_icon, self._smaller_text_button, self._text_size_box,
+            self._larger_text_button,
+        ):
+            self._text_size_layout.addWidget(widget)
+        self._text_size_bar.setVisible(False)
+
+        self._transcript_bar = QHBoxLayout()
+        self._transcript_bar.setContentsMargins(14, 10, 14, 2)
+        self._transcript_bar.setSpacing(10)
+        self._transcript_bar.addWidget(self._transcript_header)
+        self._transcript_bar.addWidget(self._tabs)
+        self._transcript_bar.addStretch(1)
+        self._transcript_bar.addWidget(self._text_size_bar)
 
         # Editing controls. The buttons are bound to the actions built in
         # _build_edit_actions, which also carry the keyboard shortcuts.
@@ -445,6 +483,7 @@ class LectureView(QWidget):
 
         self._transcript = TranscriptView()
         self._transcript.set_ask_enabled(True)
+        self._text_size_box.setValue(round(self._transcript.text_size))
 
         # The imported translation of the slide shown, under its transcript.
         self._translation_panel = QFrame()
@@ -495,12 +534,14 @@ class LectureView(QWidget):
 
         # The transcript and everything that acts on it live in one card, so
         # the pane reads as a single surface rather than a stack of strips.
-        transcript_card = QFrame()
+        self._transcript_card = transcript_card = QFrame()
         set_flag(transcript_card, "card")
+        # The text size beside the tabs shows as much of itself as fits.
+        transcript_card.installEventFilter(self)
         card_layout = QVBoxLayout(transcript_card)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setSpacing(0)
-        card_layout.addLayout(transcript_bar)
+        card_layout.addLayout(self._transcript_bar)
         card_layout.addWidget(self._edit_bar)
         card_layout.addWidget(self._find_bar)
         card_layout.addWidget(self._slide_header)
@@ -554,6 +595,7 @@ class LectureView(QWidget):
         self._player.errorOccurred.connect(self._on_player_error)
         self._transcript.seekRequested.connect(self._on_seek_requested)
         self._follow_check.toggled.connect(self._transcript.set_follow_playback)
+        self._text_size_box.valueChanged.connect(self.set_text_size)
         self._panel.startRequested.connect(self.transcribeRequested)
         self._panel.resumeRequested.connect(self.resumeTranscriptionRequested)
         self._panel.cancelRequested.connect(self.cancelRequested)
@@ -620,10 +662,37 @@ class LectureView(QWidget):
             lambda segment_id: self.ask_about_segment(segment_id, send=True)
         )
 
+    def _text_step_button(self, text: str, tip: str, step: int) -> QToolButton:
+        button = QToolButton()
+        button.setText(text)
+        button.setToolTip(tip)
+        # Held down, it keeps going.
+        button.setAutoRepeat(True)
+        button.clicked.connect(lambda: self._text_size_box.stepBy(step))
+        return button
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        if watched is self._edit_bar and event.type() == QEvent.Type.Resize:
-            self._edit_hint.setVisible(self._edit_bar.width() >= 430)
+        if event.type() == QEvent.Type.Resize:
+            if watched is self._edit_bar:
+                self._edit_hint.setVisible(self._edit_bar.width() >= 430)
+            elif watched is self._transcript_card:
+                self._fit_text_size(self._transcript_card.width())
         return super().eventFilter(watched, event)
+
+    def _fit_text_size(self, width: int) -> None:
+        """Show as much of the text size beside the tabs as a pane ``width``
+        wide has room for: all of it, else its number - which still takes
+        typing, the arrow keys and the wheel - else, very narrow, none."""
+        margins = self._transcript_bar.contentsMargins()
+        room = (width - margins.left() - margins.right() - self._tabs.sizeHint().width()
+                - self._transcript_bar.spacing())
+        steps = (self._text_size_icon, self._smaller_text_button, self._larger_text_button)
+        spacing = self._text_size_layout.spacing()
+        number = self._text_size_box.sizeHint().width()
+        whole = number + sum(w.sizeHint().width() + spacing for w in steps)
+        for widget in steps:
+            widget.setVisible(room >= whole)
+        self._text_size_box.setVisible(room >= number)
 
     # -- project binding ----------------------------------------------------
 
@@ -711,6 +780,7 @@ class LectureView(QWidget):
         self._rows = {}
         self._preview_cache.clear()
         self._tabs.setVisible(False)
+        self._text_size_bar.setVisible(False)
         self._slide_header.setVisible(False)
         self._translation_panel.setVisible(False)
         self._edit_bar.setVisible(False)
@@ -768,6 +838,7 @@ class LectureView(QWidget):
             self._tabs.setCurrentIndex(TAB_FULL)
         self._tabs.blockSignals(False)
         self._tabs.setVisible(bool(segments))
+        self._text_size_bar.setVisible(bool(segments))
 
         kept = self._project.transcript.index_of(keep_segment) if keep_segment else None
         kept_slide = self._alignment.appearance_for(kept) if kept is not None else None
@@ -1373,8 +1444,39 @@ class LectureView(QWidget):
         return self._ask_panel
 
     def set_settings(self, settings: Settings) -> None:
-        """The user's settings: the agreement to send text, and the engine."""
+        """The user's settings: the agreement to send text, the engine, and
+        the size the transcript is read at."""
+        self._settings = settings
         self._ask_panel.set_settings(settings)
+        stored = settings.transcript_text_size
+        if stored is not None:
+            self.set_text_size(stored)
+
+    # -- text size ------------------------------------------------------------
+
+    @property
+    def text_size(self) -> float:
+        """Point size of the transcript and its translation."""
+        return self._transcript.text_size
+
+    def set_text_size(self, points: float) -> None:
+        """Read the transcript, and its translation, at ``points``.
+
+        The current slide's lines and the full transcript are one list, so
+        both show it, as do the translations under the lines and the slide's
+        translation below them. The size is kept for every lecture.
+        """
+        points = float(min(max(points, MIN_TEXT_POINTS), MAX_TEXT_POINTS))
+        self._transcript.set_text_size(points)
+        font = QFont(self._translation_text.font())
+        font.setPointSizeF(points)
+        self._translation_text.setFont(font)
+        if self._text_size_box.value() != round(points):
+            self._text_size_box.blockSignals(True)
+            self._text_size_box.setValue(round(points))
+            self._text_size_box.blockSignals(False)
+        if self._settings is not None and self._settings.transcript_text_size != points:
+            self._settings.transcript_text_size = points
 
     def shutdown(self) -> None:
         """Stop work this view runs in the background, before the window closes."""
