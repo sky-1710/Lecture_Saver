@@ -262,6 +262,20 @@ class TestDrawing:
         canvas.set_tool(ink.TOOL_UNDERLINE)
         assert [m.text for m in canvas.marks] == ["kept"]
 
+    def test_clicking_elsewhere_keeps_the_memo_and_the_next_one_stays_open(self, canvas):
+        canvas.activateWindow()
+        QTest.qWaitForWindowActive(canvas)
+        canvas.set_tool(ink.TOOL_MEMO)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(100, 90))
+        QTest.keyClicks(canvas._memo_editor, "first")
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(400, 300))
+        # The first box's wait for the focus is over by now; it closed nothing.
+        QTest.qWait(50)
+        assert canvas.is_typing
+        QTest.keyClicks(canvas._memo_editor, "second")
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert [m.text for m in canvas.marks] == ["first", "second"]
+
     def test_the_eraser_removes_the_mark_clicked(self, canvas):
         canvas.set_marks([Mark.underline(0.25, 0.5, 0.75, 0.5), Mark.underline(0.25, 0.8,
                                                                                0.75, 0.8)])
@@ -1007,6 +1021,50 @@ class TestCapturePanel:
         drag(panel.canvas, *_across(panel.canvas))
         panel.select(second.capture_id)
         assert len(Project.open(project.root).captures.get(first.capture_id).marks) == 1
+
+    def _type_memo(self, panel, text):
+        canvas = panel.canvas
+        canvas.set_tool(ink.TOOL_MEMO)
+        rect = canvas.picture_rect()
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton,
+                         pos=QPoint(int(rect.left()) + 40, int(rect.top()) + 40))
+        # Set rather than typed: QTest cannot type Hangul (the process ends).
+        canvas._memo_editor.setText(text)
+        assert canvas.is_typing
+
+    def test_a_memo_being_typed_stays_when_another_screenshot_is_clicked(
+        self, panel, project
+    ):
+        first = panel.add_screenshot(shot(10.0))
+        second = panel.add_screenshot(shot(20.0))
+        panel.flush()
+        self._type_memo(panel, "시험 범위")
+        strip = panel._strip
+        tile = strip.visualRect(panel._model.index(0, 0)).center()
+        QTest.mouseClick(strip.viewport(), Qt.MouseButton.LeftButton, pos=tile)
+        assert panel.selected == first
+        assert panel.flush()
+        # On the screenshot it was typed on, not the one chosen.
+        reopened = Project.open(project.root).captures
+        assert [m.text for m in reopened.get(second.capture_id).marks] == ["시험 범위"]
+        assert reopened.get(first.capture_id).marks == []
+
+    def test_a_memo_being_typed_stays_when_a_screenshot_is_taken(self, panel, project):
+        first = panel.add_screenshot(shot(10.0))
+        panel.flush()
+        self._type_memo(panel, "before the next")
+        panel.add_screenshot(shot(20.0))
+        assert panel.flush()
+        reopened = Project.open(project.root).captures
+        assert [m.text for m in reopened.get(first.capture_id).marks] == ["before the next"]
+
+    def test_a_memo_being_typed_is_written_when_the_lecture_closes(self, panel, project):
+        capture = panel.add_screenshot(shot(10.0))
+        panel.flush()
+        self._type_memo(panel, "not lost")
+        assert panel.flush()
+        assert [m.text for m in Project.open(project.root).captures.get(
+            capture.capture_id).marks] == ["not lost"]
 
     def test_play_starts_a_little_before_the_marking(self, panel):
         panel.add_screenshot(shot(75.0, start=70.0))

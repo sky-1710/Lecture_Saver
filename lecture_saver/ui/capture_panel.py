@@ -415,6 +415,10 @@ class CapturePanel(QFrame):
         super().__init__(parent)
         set_flag(self, "card")
         self._project: Project | None = None
+        #: The screenshot on the canvas, whose marks the canvas edits. Not
+        #: always the one selected: a memo still open when another is chosen
+        #: is kept on the one it was typed on.
+        self._shown: Capture | None = None
         #: Screenshots whose marks changed and are not written yet.
         self._dirty: set[int] = set()
         #: Pictures of new screenshots until they are on disk, by capture id.
@@ -668,8 +672,11 @@ class CapturePanel(QFrame):
         # Edits to the previous screenshot are written before another is shown
         # - unless a new screenshot is still being written, which must not be
         # waited for here: this runs when a screenshot is taken during playback.
+        # A memo still being typed is one of those edits.
+        self._canvas.commit_memo()
         self._write_soon()
         capture = self._model.capture_at(current.row()) if current.isValid() else None
+        self._shown = capture if self._project is not None else None
         if capture is None or self._project is None:
             self._canvas.show_capture(QImage(), (), "Choose a screenshot above.")
         else:
@@ -749,7 +756,7 @@ class CapturePanel(QFrame):
     # -- saving edits ---------------------------------------------------------
 
     def _on_marks_edited(self) -> None:
-        capture = self.selected
+        capture = self._shown
         if capture is None:
             return
         capture.marks = list(self._canvas.marks)
@@ -763,6 +770,8 @@ class CapturePanel(QFrame):
 
         False if something could not be written.
         """
+        # A memo still open is kept, as clicking anywhere else would keep it.
+        self._canvas.commit_memo()
         self._save_timer.stop()
         if self._writer.busy:
             self._writer.wait()

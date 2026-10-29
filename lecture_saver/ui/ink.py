@@ -591,6 +591,14 @@ class _MemoEditor(QLineEdit):
             self._done = True
             self.committed.emit()
 
+    def finish(self) -> None:
+        """Closed by the canvas: from now on it neither keeps nor drops a memo.
+
+        Clicking elsewhere on the picture closes it before its own wait for
+        the focus is over; that wait must not then close the memo opened next.
+        """
+        self._done = True
+
 
 class InkCanvas(QWidget):
     """A picture with marks over it that the user can add to and edit.
@@ -1185,6 +1193,7 @@ class InkCanvas(QWidget):
         self._memo_index = -1
         self.textSizeShown.emit(self._text_size)
         if editor is not None:
+            editor.finish()
             editor.hide()
             editor.deleteLater()
             if self.isVisible():
