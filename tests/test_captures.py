@@ -91,6 +91,22 @@ class TestMark:
         data = {"kind": "memo", "x": 0.1, "y": 0.1, "text": "x", "size": size}
         assert Mark.from_dict(data).size == 0.0
 
+    def test_a_memo_keeps_its_box_width(self):
+        memo = Mark.memo(0.1, 0.1, "wide", width=0.35)
+        assert Mark.from_dict(memo.to_dict()) == memo
+        assert memo.to_dict()["width"] == 0.35
+        assert memo.with_text("still wide").width == 0.35
+
+    def test_a_memo_without_a_width_fits_its_text(self):
+        assert "width" not in Mark.memo(0.1, 0.1, "x").to_dict()
+        old = {"kind": "memo", "x": 0.1, "y": 0.1, "text": "from before"}
+        assert Mark.from_dict(old).width == 0.0
+
+    @pytest.mark.parametrize("width", [0.0, -0.2, 1.5, "wide", True])
+    def test_what_is_not_a_width_is_none(self, width):
+        data = {"kind": "memo", "x": 0.1, "y": 0.1, "text": "x", "width": width}
+        assert Mark.from_dict(data).width == 0.0
+
     def test_changing_a_memo_keeps_its_colour(self):
         memo = Mark.memo(0.1, 0.1, "draft", "#7b3fc4")
         assert memo.with_text("final").colour == "#7b3fc4"

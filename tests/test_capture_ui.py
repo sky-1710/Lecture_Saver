@@ -493,6 +493,104 @@ class TestTextSize:
         assert [m.text for m in canvas.marks] == ["kept"]
 
 
+class TestMemoWidth:
+    TEXT = "a memo with quite a few words in it to wrap"
+
+    def _edge(self, canvas, memo):
+        box = ink.memo_box(memo, canvas.picture_rect())
+        return box, QPoint(int(box.right()) - 1, int(box.center().y()))
+
+    def test_a_set_width_is_the_box_width_and_the_text_wraps_to_it(self, canvas):
+        rect = canvas.picture_rect()
+        wide = ink.memo_box(Mark.memo(0.1, 0.1, self.TEXT, width=0.6), rect)
+        narrow = ink.memo_box(Mark.memo(0.1, 0.1, self.TEXT, width=0.15), rect)
+        assert wide.width() == pytest.approx(0.6 * rect.width())
+        assert narrow.width() == pytest.approx(0.15 * rect.width())
+        assert narrow.height() > wide.height() * 2  # more lines
+
+    def test_dragging_the_right_edge_sets_the_width(self, canvas):
+        memo = Mark.memo(0.1, 0.2, self.TEXT)
+        canvas.set_marks([memo])
+        canvas.set_tool(ink.TOOL_MEMO)
+        box, edge = self._edge(canvas, memo)
+        drag(canvas, edge, edge + QPoint(-150, 0))
+        (changed,) = canvas.marks
+        assert changed.width * 800 == pytest.approx(box.width() - 150, abs=2)
+        # Only its width: where it is and what it says stay.
+        assert (changed.x1, changed.y1, changed.text) == (memo.x1, memo.y1, memo.text)
+        assert not canvas.is_typing
+
+    def test_a_narrower_box_is_taller(self, canvas):
+        memo = Mark.memo(0.1, 0.2, self.TEXT)
+        canvas.set_marks([memo])
+        canvas.set_tool(ink.TOOL_MEMO)
+        box, edge = self._edge(canvas, memo)
+        drag(canvas, edge, edge + QPoint(-int(box.width() * 0.6), 0))
+        assert ink.memo_box(canvas.marks[0], canvas.picture_rect()).height() > box.height()
+
+    def test_never_narrower_than_a_few_letters_nor_past_the_picture(self, canvas):
+        memo = Mark.memo(0.5, 0.2, self.TEXT)
+        canvas.set_marks([memo])
+        canvas.set_tool(ink.TOOL_MEMO)
+        rect = canvas.picture_rect()
+        _box, edge = self._edge(canvas, memo)
+        drag(canvas, edge, QPoint(0, edge.y()))
+        smallest = ink.memo_min_width(memo, rect)
+        assert canvas.marks[0].width * rect.width() == pytest.approx(smallest, abs=1)
+
+        _box, edge = self._edge(canvas, canvas.marks[0])
+        drag(canvas, edge, QPoint(5000, edge.y()))
+        box = ink.memo_box(canvas.marks[0], rect)
+        assert box.right() <= rect.right() + 0.5
+
+    def test_a_width_change_is_undone_like_any_change(self, canvas):
+        memo = Mark.memo(0.1, 0.2, self.TEXT)
+        canvas.set_marks([memo])
+        canvas.set_tool(ink.TOOL_MEMO)
+        _box, edge = self._edge(canvas, memo)
+        drag(canvas, edge, edge + QPoint(-120, 0))
+        assert canvas.undo()
+        assert canvas.marks == (memo,)
+
+    def test_clicking_the_edge_without_dragging_opens_the_memo(self, canvas):
+        memo = Mark.memo(0.1, 0.2, self.TEXT)
+        canvas.set_marks([memo])
+        canvas.set_tool(ink.TOOL_MEMO)
+        _box, edge = self._edge(canvas, memo)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=edge)
+        assert canvas.is_typing and canvas._memo_editor.text() == self.TEXT
+
+    def test_the_edge_shows_it_can_be_dragged_and_the_memo_is_framed(self, canvas):
+        memo = Mark.memo(0.1, 0.2, self.TEXT)
+        canvas.set_marks([memo])
+        canvas.set_tool(ink.TOOL_MEMO)
+        box, edge = self._edge(canvas, memo)
+        QTest.mouseMove(canvas, edge)
+        assert canvas.cursor().shape() == Qt.CursorShape.SizeHorCursor
+        assert canvas._hovered == 0
+        QTest.mouseMove(canvas, QPoint(int(box.left()) + 10, int(box.center().y())))
+        assert canvas.cursor().shape() == Qt.CursorShape.SizeAllCursor
+        QTest.mouseMove(canvas, QPoint(700, 420))
+        assert canvas._hovered == -1
+
+    def test_with_another_tool_the_edge_is_nothing_special(self, canvas):
+        memo = Mark.memo(0.1, 0.2, self.TEXT)
+        canvas.set_marks([memo])
+        _box, edge = self._edge(canvas, memo)
+        drag(canvas, edge, edge + QPoint(-150, 40))  # the free pen draws
+        assert canvas.marks[0] == memo
+        assert [m.kind for m in canvas.marks] == [MEMO, PEN]
+
+    def test_the_memo_is_changed_in_a_box_as_wide_as_it(self, canvas):
+        memo = Mark.memo(0.1, 0.2, self.TEXT, width=0.3)
+        canvas.set_marks([memo])
+        QTest.mouseDClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        assert canvas.is_typing
+        assert canvas._memo_editor.width() == pytest.approx(0.3 * 800, abs=2)
+        QTest.keyClick(canvas._memo_editor, Qt.Key.Key_Return)
+        assert canvas.marks[0].width == 0.3
+
+
 class TestMovingMemos:
     def test_a_memo_dragged_with_the_memo_tool_moves(self, canvas):
         canvas.set_marks([Mark.memo(0.5, 0.2, "move me", "#1f5fd6", 0.03)])

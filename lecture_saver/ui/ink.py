@@ -98,8 +98,9 @@ TOOL_TIPS = {
     TOOL_HIGHLIGHT: "Drag a box over what matters - or drag along one line of text to "
                     "highlight that line.",
     TOOL_MEMO: "Click where the note goes and type; Enter keeps it, Esc drops it.\n"
-               "Drag a memo with this tool to move it; click it to change it - or "
-               "double-click it with any tool.",
+               "Drag a memo with this tool to move it, or its right edge to make it "
+               "wider or narrower; click it to change it - or double-click it with "
+               "any tool.",
     TOOL_ERASER: "Click or drag over marks to remove them.\n"
                  "Right-click removes a mark whichever tool is chosen.",
 }
@@ -220,18 +221,32 @@ def _memo_padding(font: QFont) -> float:
     return max(3.0, font.pixelSize() * 0.35)
 
 
+def memo_min_width(mark: Mark, rect: QRectF) -> float:
+    """The narrowest a memo box can be made, in pixels: a few letters wide."""
+    font = memo_font(rect, mark.size)
+    return font.pixelSize() * 3.0 + 2 * _memo_padding(font)
+
+
 def memo_box(mark: Mark, rect: QRectF) -> QRectF:
-    """Where a memo's note is drawn: its text wrapped, kept inside the picture."""
+    """Where a memo's note is drawn: its text wrapped, kept inside the picture.
+
+    A memo given a width is exactly that wide, its text wrapped inside it;
+    one without fits its text, up to MEMO_MAX_WIDTH of the picture.
+    """
     font = memo_font(rect, mark.size)
     pad = _memo_padding(font)
-    wrap = max(rect.width() * MEMO_MAX_WIDTH, font.pixelSize() * 5.0)
+    if mark.width:
+        outer = min(rect.width(), max(mark.width * rect.width(), memo_min_width(mark, rect)))
+        wrap = outer - 2 * pad
+    else:
+        wrap = max(rect.width() * MEMO_MAX_WIDTH, font.pixelSize() * 5.0)
     text = QFontMetricsF(font).boundingRect(
         QRectF(0, 0, wrap, 100_000),
         int(Qt.AlignmentFlag.AlignLeft) | int(Qt.TextFlag.TextWordWrap),
         mark.text,
     )
-    box = QRectF(to_pixels(mark.x1, mark.y1, rect), QSizeF(text.width() + 2 * pad,
-                                                           text.height() + 2 * pad))
+    width = outer if mark.width else text.width() + 2 * pad
+    box = QRectF(to_pixels(mark.x1, mark.y1, rect), QSizeF(width, text.height() + 2 * pad))
     # A note clicked near the right or bottom edge grows back into the picture.
     if box.right() > rect.right():
         box.moveRight(rect.right())
@@ -242,6 +257,24 @@ def memo_box(mark: Mark, rect: QRectF) -> QRectF:
     if box.top() < rect.top():
         box.moveTop(rect.top())
     return box
+
+
+#: How close to a memo box's right edge, in pixels, the pointer must be for a
+#: drag to change its width rather than move it.
+EDGE_GRIP_PX = 6
+
+
+def memo_edge_at(marks: Sequence[Mark], point: QPointF, rect: QRectF) -> int:
+    """Index of the topmost memo whose right edge is under ``point``, or -1."""
+    for index in reversed(paint_order(marks)):
+        mark = marks[index]
+        if mark.kind != MEMO:
+            continue
+        box = memo_box(mark, rect)
+        if (abs(point.x() - box.right()) <= EDGE_GRIP_PX
+                and box.top() <= point.y() <= box.bottom()):
+            return index
+    return -1
 
 
 def paint_order(marks: Sequence[Mark]) -> list[int]:
@@ -340,6 +373,23 @@ def stroke_path(points: Sequence[QPointF]) -> QPainterPath:
                                     (corner.y() + following.y()) / 2))
     path.lineTo(points[-1])
     return path
+
+
+def paint_memo_frame(painter: QPainter, mark: Mark, rect: QRectF) -> None:
+    """A dashed frame round a memo, and a grip on its right edge: where it can
+    be moved from, and where its width is dragged. Never printed."""
+    box = memo_box(mark, rect)
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    frame = QPen(QColor(theme.ACCENT), 1.0, Qt.PenStyle.DashLine)
+    painter.setPen(frame)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRect(box)
+    grip = QRectF(box.right() - 2.5, box.center().y() - 7, 5, 14)
+    painter.setPen(QPen(QColor(theme.ACCENT), 1.0))
+    painter.setBrush(QColor(theme.SURFACE))
+    painter.drawRoundedRect(grip, 2, 2)
+    painter.restore()
 
 
 def _paint_memo(painter: QPainter, mark: Mark, rect: QRectF) -> None:
@@ -581,6 +631,13 @@ class InkCanvas(QWidget):
         #: place then). A drag moves it; a click opens it.
         self._move: tuple[int, QPointF, tuple[float, float]] | None = None
         self._move_to = QPointF()
+        #: A memo whose right edge is being dragged: (index, where the drag
+        #: began, the box's width then in pixels).
+        self._resize: tuple[int, QPointF, float] | None = None
+        self._resize_to = QPointF()
+        #: The memo under the pointer with the memo tool: framed, to show it
+        #: can be moved and how wide it is.
+        self._hovered = -1
         self._editable = True
         self._drag_from: QPointF | None = None
         #: The pen stroke being drawn, in pixels on screen.
@@ -635,6 +692,8 @@ class InkCanvas(QWidget):
         self._drag_from = None
         self._stroke = None
         self._move = None
+        self._resize = None
+        self._hovered = -1
         self._sheet.load(marks)
         self.update()
         self.marksLoaded.emit()
@@ -715,6 +774,7 @@ class InkCanvas(QWidget):
             self._drag_from = None
             self._stroke = None
             self._move = None
+            self._resize = None
         self._editable = editable
         self._update_cursor()
 
@@ -751,10 +811,21 @@ class InkCanvas(QWidget):
             return
         self.paint_picture(painter, rect)
         moving = self._moved_memo(rect)
-        skip = self._move[0] if moving is not None and self._move is not None else self._memo_index
+        resized = self._resized_memo(rect)
+        if moving is not None and self._move is not None:
+            skip, changed = self._move[0], moving
+        elif resized is not None and self._resize is not None:
+            skip, changed = self._resize[0], resized
+        else:
+            skip, changed = self._memo_index, None
         paint_marks(painter, self._sheet.marks, rect, skip=skip)
-        if moving is not None:
-            paint_marks(painter, [moving], rect)
+        if changed is not None:
+            paint_marks(painter, [changed], rect)
+            paint_memo_frame(painter, changed, rect)
+        elif 0 <= self._hovered < len(self._sheet.marks) and self._hovered != self._memo_index:
+            hovered = self._sheet.marks[self._hovered]
+            if hovered.kind == MEMO and self._tool == TOOL_MEMO and self._editable:
+                paint_memo_frame(painter, hovered, rect)
         self._paint_drag(painter, rect)
         if self._flash:
             painter.fillRect(rect, QColor(255, 255, 255, int(255 * self._flash)))
@@ -798,8 +869,14 @@ class InkCanvas(QWidget):
         elif self._tool == TOOL_PEN:
             self._stroke = [point]
         elif self._tool == TOOL_MEMO:
+            edge = memo_edge_at(self._sheet.marks, point, rect)
             index = hit_test(self._sheet.marks, point, rect)
-            if index >= 0 and self._sheet.marks[index].kind == MEMO:
+            if edge >= 0:
+                # Its right edge: dragged, the box gets wider or narrower.
+                box = memo_box(self._sheet.marks[edge], rect)
+                self._resize = (edge, point, box.width())
+                self._resize_to = point
+            elif index >= 0 and self._sheet.marks[index].kind == MEMO:
                 # Dragged, it moves; let go where it was, it opens.
                 existing = self._sheet.marks[index]
                 self._move = (index, point, (existing.x1, existing.y1))
@@ -813,7 +890,10 @@ class InkCanvas(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
         rect = self.picture_rect()
-        if self._move is not None:
+        if self._resize is not None:
+            self._resize_to = event.position()
+            self.update()
+        elif self._move is not None:
             self._move_to = event.position()
             self.update()
         elif self._stroke is not None:
@@ -832,12 +912,31 @@ class InkCanvas(QWidget):
             super().mouseMoveEvent(event)
 
     def _hover(self, point: QPointF, rect: QRectF) -> None:
-        """With the memo tool, a memo under the pointer shows it can be moved."""
+        """With the memo tool, a memo under the pointer is framed: moved from
+        inside, made wider or narrower from its right edge."""
         if not self._editable or self._tool != TOOL_MEMO or rect.isEmpty():
+            self._set_hovered(-1)
             return
+        edge = memo_edge_at(self._sheet.marks, point, rect)
         index = hit_test(self._sheet.marks, point, rect)
-        over = index >= 0 and self._sheet.marks[index].kind == MEMO
-        self.setCursor(Qt.CursorShape.SizeAllCursor if over else Qt.CursorShape.IBeamCursor)
+        if edge >= 0:
+            self._set_hovered(edge)
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif index >= 0 and self._sheet.marks[index].kind == MEMO:
+            self._set_hovered(index)
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        else:
+            self._set_hovered(-1)
+            self.setCursor(Qt.CursorShape.IBeamCursor)
+
+    def _set_hovered(self, index: int) -> None:
+        if index != self._hovered:
+            self._hovered = index
+            self.update()
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt naming
+        self._set_hovered(-1)
+        super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
         """A memo double-clicked is opened to be changed, whichever tool is chosen."""
@@ -860,7 +959,19 @@ class InkCanvas(QWidget):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
-        if self._move is not None and event.button() == Qt.MouseButton.LeftButton:
+        if self._resize is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._resize_to = event.position()
+            index = self._resize[0]
+            resized = self._resized_memo(self.picture_rect())
+            self._resize = None
+            if resized is not None:
+                self._sheet.replace(index, resized)
+                self._changed(True)
+            elif 0 <= index < len(self._sheet.marks):
+                # Its edge clicked rather than dragged: a click on the memo.
+                memo = self._sheet.marks[index]
+                self.open_memo(memo.x1, memo.y1, memo.text, index=index)
+        elif self._move is not None and event.button() == Qt.MouseButton.LeftButton:
             self._move_to = event.position()
             index = self._move[0]
             moved = self._moved_memo(self.picture_rect())
@@ -890,6 +1001,22 @@ class InkCanvas(QWidget):
                 self.update()
         self._erasing = False
         super().mouseReleaseEvent(event)
+
+    def _resized_memo(self, rect: QRectF) -> Mark | None:
+        """The memo whose edge is dragged at its new width, or ``None`` if the
+        edge has not really moved."""
+        if self._resize is None or rect.isEmpty():
+            return None
+        index, start, width = self._resize
+        if index >= len(self._sheet.marks):
+            return None
+        dx = self._resize_to.x() - start.x()
+        if abs(dx) < 2:
+            return None
+        memo = self._sheet.marks[index]
+        left = memo_box(memo, rect).left()
+        wanted = max(memo_min_width(memo, rect), min(width + dx, rect.right() - left))
+        return replace(memo, width=wanted / rect.width())
 
     def _moved_memo(self, rect: QRectF) -> Mark | None:
         """The memo being dragged at its new place, or ``None`` if it was a click."""
@@ -1009,6 +1136,9 @@ class InkCanvas(QWidget):
             return
         editor.setFont(memo_font(rect, self._memo_size))
         width = int(max(rect.width() * MEMO_MAX_WIDTH, 150))
+        marks = self._sheet.marks
+        if 0 <= self._memo_index < len(marks) and marks[self._memo_index].width:
+            width = int(max(memo_box(marks[self._memo_index], rect).width(), 60))
         height = editor.sizeHint().height()
         point = to_pixels(*self._memo_at, rect)
         left = int(min(max(point.x(), rect.left()), rect.right() - width))
@@ -1088,10 +1218,12 @@ class InkCanvas(QWidget):
         elif _is_redo(event):
             self.redo()
         elif event.key() == Qt.Key.Key_Escape:
-            if self._drag_from is not None or self._stroke is not None or self._move:
+            if (self._drag_from is not None or self._stroke is not None or self._move
+                    or self._resize):
                 self._drag_from = None
                 self._stroke = None
                 self._move = None
+                self._resize = None
                 self.update()
             else:
                 self.escapePressed.emit()
@@ -1109,6 +1241,8 @@ class InkCanvas(QWidget):
         self._drag_from = None
         self._stroke = None
         self._move = None
+        self._resize = None
+        self._hovered = -1
         self._erasing = False
         super().hideEvent(event)
 

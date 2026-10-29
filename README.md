@@ -122,7 +122,8 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    one), and beside it is a typed **memo** (5) - double-click one to change
    it later. The dot beside them picks the **ink**: red, blue, black, green,
    orange, purple or white; the number beside it the memo **text size**. Drag a
-   memo with the memo tool to move it. Press **S** (or *Screenshot*)
+   memo with the memo tool to move it, or its right edge to set how wide it
+   is. Press **S** (or *Screenshot*)
    to keep the picture on screen with your marks. *Screenshots* opens them
    beside the video: change any screenshot's marks there, and *Play from*
    replays the stretch you were marking. *Export PDF* at the top of the panel
@@ -389,9 +390,12 @@ to one language for the whole recording.
   button goes back to the kind used last, its arrow picks another. **Memo** (5)
   is typed where you click as plain text, no box: Enter keeps it, Esc drops
   it, and a memo kept is changed by clicking it with the memo tool or
-  double-clicking it with any. **Drag** a memo with the memo tool to move it
-  (the pointer shows when it can be); Undo puts it back. Right-click removes
-  a mark with any tool
+  double-clicking it with any. **Drag** a memo with the memo tool to move it,
+  or drag its **right edge** to make the box wider or narrower - its text
+  wraps to the width, and the box keeps it from then on (one never resized
+  fits its text). Pointing at a memo with the memo tool frames it, with a
+  grip on that edge; the frame is never printed. Undo puts either back.
+  Right-click removes a mark with any tool
 - **Ink**: the dot after the memo button colours new pen strokes, underlines
   and memos - red, blue, black, green, orange, purple or white (for dark
   slides). Each mark keeps its own; changing the ink while typing a memo

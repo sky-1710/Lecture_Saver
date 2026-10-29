@@ -86,6 +86,13 @@ def _text_size(value: object) -> float:
     return float(value) if 0.005 <= value <= 0.25 else 0.0
 
 
+def _box_width(value: object) -> float:
+    """A memo box's width as a fraction of the picture's, or 0 - fit the text."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return 0.0
+    return float(value) if 0.01 <= value <= 1.0 else 0.0
+
+
 def _number(value: object, default: float = 0.0) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
@@ -117,6 +124,9 @@ class Mark:
     #: A memo's text height as a fraction of the picture's; 0 is the default
     #: size, and what memos from before sizes could be chosen have.
     size: float = 0.0
+    #: A memo box's width as a fraction of the picture's, its text wrapped to
+    #: it; 0 - every memo before widths could be set - fits the text.
+    width: float = 0.0
 
     @classmethod
     def pen(cls, points: Iterable[Point], colour: str = "") -> Mark:
@@ -141,11 +151,12 @@ class Mark:
 
     @classmethod
     def memo(
-        cls, x: float, y: float, text: str, colour: str = "", size: float = 0.0
+        cls, x: float, y: float, text: str, colour: str = "", size: float = 0.0,
+        width: float = 0.0,
     ) -> Mark:
         left, top, _, _ = _clamped(x, y, x, y)
         return cls(MEMO, left, top, left, top, text, colour=_colour(colour),
-                   size=_text_size(size))
+                   size=_text_size(size), width=_box_width(width))
 
     def with_text(self, text: str) -> Mark:
         return replace(self, text=text)
@@ -160,6 +171,8 @@ class Mark:
                     "text": self.text}
             if self.size:
                 data["size"] = round(self.size, 4)
+            if self.width:
+                data["width"] = round(self.width, 4)
         else:
             data = {
                 "kind": self.kind,
@@ -195,7 +208,8 @@ class Mark:
             text = data.get("text")
             if x is None or y is None or not isinstance(text, str) or not text.strip():
                 return None
-            return cls.memo(x, y, text, colour, _text_size(data.get("size")))
+            return cls.memo(x, y, text, colour, _text_size(data.get("size")),
+                            _box_width(data.get("width")))
         if kind not in (UNDERLINE, HIGHLIGHT):
             return None
         corners = [_unit(data.get(key)) for key in ("x1", "y1", "x2", "y2")]
