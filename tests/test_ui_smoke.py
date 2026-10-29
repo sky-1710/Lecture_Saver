@@ -20,6 +20,7 @@ os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
 pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem  # noqa: E402
 
 from lecture_saver.config import Settings  # noqa: E402
@@ -1989,6 +1990,124 @@ class TestTranscriptTextSize:
     def test_only_with_a_transcript(self, qapp):
         view = LectureView()
         assert view._text_size_bar.isHidden()
+
+
+# --------------------------------------------------------------------------
+# Selecting and copying the words of the transcript and its translation
+# --------------------------------------------------------------------------
+
+
+def _point_of(transcript, row, part, letter):
+    """Where in the list's viewport letter ``letter`` of a row's part begins."""
+    index = transcript.model().index(row, 0)
+    option = QStyleOptionViewItem()
+    transcript.initViewItemOption(option)
+    option.rect = transcript.visualRect(index)
+    for each, _words, layout, origin in transcript.itemDelegate()._parts(option, index):
+        if each == part:
+            line = layout.lineForTextPosition(letter)
+            x, _ = line.cursorToX(letter)
+            return QPoint(round(origin.x() + x), round(origin.y() + line.y() + line.height() / 2))
+    raise AssertionError(f"row {row} has no part {part}")
+
+
+class TestSelectingWords:
+    @pytest.fixture
+    def view(self, editing_view, project_with_slides):
+        project_with_slides.import_translation(TestLineByLineTranslation.ANSWER)
+        editing_view.refresh_translations()
+        QApplication.processEvents()
+        return editing_view
+
+    def _drag(self, transcript, start, end):
+        from PySide6.QtTest import QTest
+
+        viewport = transcript.viewport()
+        QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         start)
+        QTest.mouseMove(viewport, start + QPoint(8, 0))
+        QTest.mouseMove(viewport, end)
+        QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                           end)
+
+    def _copy(self, transcript, key=Qt.Key.Key_C):
+        from PySide6.QtTest import QTest
+
+        QGuiApplication.clipboard().clear()
+        QTest.keyClick(transcript, key, Qt.KeyboardModifier.ControlModifier)
+        return QGuiApplication.clipboard().text()
+
+    def test_dragging_over_a_line_selects_its_words_and_does_not_seek(self, view):
+        from lecture_saver.ui.transcript_view import PART_TEXT
+
+        transcript = view._transcript
+        seeks: list[float] = []
+        transcript.seekRequested.connect(seeks.append)
+        text = transcript.model().index(0, 0).data(Qt.ItemDataRole.DisplayRole)
+        first = text.index("basic concepts")
+        self._drag(transcript, _point_of(transcript, 0, PART_TEXT, first),
+                   _point_of(transcript, 0, PART_TEXT, first + len("basic concepts")))
+
+        assert transcript.selected_text == "basic concepts"
+        assert self._copy(transcript) == "basic concepts"
+        assert seeks == []
+
+    def test_a_drag_goes_on_into_the_next_lines_and_their_translations(self, view):
+        from lecture_saver.ui.transcript_view import PART_TEXT, PART_TRANSLATION
+
+        transcript = view._transcript
+        model = transcript.model()
+        text = model.index(0, 0).data(Qt.ItemDataRole.DisplayRole)
+        start = text.index("machine")
+        self._drag(transcript, _point_of(transcript, 0, PART_TEXT, start),
+                   _point_of(transcript, 1, PART_TRANSLATION, len("여기서 learning")))
+
+        assert transcript.selected_text == "\n".join([
+            "machine learning.",
+            "오늘은 machine learning의 기본 개념부터 시작합니다.",
+            "여기서 러닝레이트를 보시면",
+            "여기서 learning",
+        ])
+
+    def test_a_click_still_seeks_and_lets_go_of_the_words(self, view):
+        from PySide6.QtTest import QTest
+
+        from lecture_saver.ui.transcript_view import PART_TEXT
+
+        transcript = view._transcript
+        transcript.select_all_text()
+        seeks: list[float] = []
+        transcript.seekRequested.connect(seeks.append)
+        QTest.mouseClick(transcript.viewport(), Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier, _point_of(transcript, 1, PART_TEXT, 2))
+        assert seeks == [10.0]
+        assert not transcript.has_text_selection
+
+    def test_ctrl_a_selects_everything_lines_and_translations(self, view):
+        transcript = view._transcript
+        model = transcript.model()
+        self._copy(transcript, Qt.Key.Key_A)
+        expected = "\n".join(transcript.row_text(row) for row in range(model.rowCount()))
+        assert "오늘은 machine learning의" in expected
+        assert self._copy(transcript) == expected
+
+    def test_with_nothing_selected_ctrl_c_copies_the_line_and_its_translation(self, view):
+        transcript = view._transcript
+        transcript.setCurrentIndex(transcript.model().index(1, 0))
+        assert self._copy(transcript) == "여기서 러닝레이트를 보시면\n여기서 learning rate를 보시면"
+
+    def test_selected_words_are_drawn_selected(self, view):
+        transcript = view._transcript
+        before = transcript.viewport().grab().toImage()
+        transcript.select_all_text()
+        after = transcript.viewport().grab().toImage()
+        assert before != after
+
+    def test_editing_a_line_lets_go_of_the_words(self, view):
+        transcript = view._transcript
+        transcript.select_all_text()
+        _open_editor(view, "segment_001")
+        assert not transcript.has_text_selection
 
 
 # --------------------------------------------------------------------------

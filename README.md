@@ -311,6 +311,14 @@ to one language for the whole recording.
   its lines, the Korean under them and the slide's translation below. The
   times stay as they are, and the size is kept for every lecture. In a narrow
   pane only the number shows, and in the narrowest none of it
+- **Selecting and copying**: drag over the words of the transcript - and the
+  Korean under its lines - to select them, across as many lines as you like
+  (past the top or bottom the list scrolls along); Ctrl+C copies them, a line
+  of the transcript or of a translation to each line. Ctrl+A selects it all;
+  with nothing selected Ctrl+C copies the selected line and its translation.
+  Right-click a line for *Copy this line* and *Copy its translation*. A click
+  still jumps the video there and a double-click still edits. The slide's
+  translation below the transcript is selected and copied the usual way
 - Synchronisation: playback crossing a slide change selects that slide in the
   navigator and switches the transcript to it; clicking a slide shows it and
   seeks there; clicking a segment seeks there. Untick *Follow playback* (under
