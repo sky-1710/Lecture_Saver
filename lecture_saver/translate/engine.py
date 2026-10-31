@@ -14,17 +14,21 @@ means the transcript leaves the computer. That is why translation is off until
 the user turns it on, and why the confirmation before the first run says so
 plainly.
 
-What never leaves, on any path: the video, the audio, the slide images. An
-engine is given a string and returns a string; it is not handed the project,
-its files or their paths. A PDF attached for the typo check goes the same way:
-as the words on its pages, in the prompt, never as the file.
+What never leaves, on any path: the video, the audio, the pictures taken from
+the video. An engine is given a string and returns a string; it is not handed
+the project or its paths. A lecture's attached PDF goes as the words on its
+pages, in the prompt, never as the file. The one thing that is not a string is
+for the review's quiz: pictures of those same pages, which a diagram needs,
+sent only when the window says so and with the box for them ticked.
 """
 
 from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -105,16 +109,20 @@ class TranslationEngine(ABC):
         *,
         cancel: threading.Event,
         schema: dict[str, Any] | None = None,
+        images: Sequence[Path] = (),
     ) -> str:
         """Send ``prompt``; with ``schema``, the answer must be JSON of that shape.
 
-        The study pack uses this: a quiz is data, and an engine that can make
+        The review's quiz uses this: a quiz is data, and an engine that can make
         the model keep to a JSON schema gives far more dependable data than
         one whose answer has to be dug out of prose. An engine that cannot
         enforce a schema says so rather than returning something unchecked.
+        ``images`` go with the prompt, in order, for an engine that can show them.
         """
         if schema is not None:
             raise TranslationError(f"{self.label} cannot return structured answers.")
+        if images:
+            raise TranslationError(f"{self.label} cannot be shown pictures.")
         return self.translate(prompt, cancel=cancel)
 
     #: Whether :meth:`converse` can carry a conversation on in one session.

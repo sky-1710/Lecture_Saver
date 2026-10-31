@@ -28,6 +28,7 @@ __all__ = [
     "Batch",
     "DEFAULT_MAX_CHARS",
     "DEFAULT_MAX_SLIDES",
+    "TRANSLATED_INTO",
     "batch_markdown",
     "plan_batches",
     "translatable_sections",
@@ -44,6 +45,9 @@ DEFAULT_MAX_CHARS = 12000
 #: A hard ceiling regardless of length, so a run of near-empty slides does not
 #: produce one request covering forty headings.
 DEFAULT_MAX_SLIDES = 12
+
+#: The language translations are into. A lecture given in it needs none.
+TRANSLATED_INTO = "ko"
 
 
 @dataclass(frozen=True)

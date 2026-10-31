@@ -25,10 +25,12 @@ The goal is lecture notes rather than a debug dump:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 from collections.abc import Callable
 from datetime import datetime
+from itertools import groupby
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -45,6 +47,7 @@ __all__ = [
     "find_korean_font",
     "notes_story",
     "pdf_styles",
+    "printable",
     "write_pdf",
     "write_screenshots_pdf",
 ]
@@ -58,9 +61,17 @@ SCREENSHOT_PAGE_WIDTH = 960.0
 
 _REGULAR = "LectureSaverSans"
 _BOLD = "LectureSaverSans-Bold"
-#: Public names for other PDFs built on this module (the study pack).
+#: For what the Korean font has no shape for: an assistant's check mark or a
+#: subscript would otherwise print as an empty box. Optional, so it is only a
+#: loss of those few characters on a computer without one of these fonts.
+_SYMBOLS = "LectureSaverSymbols"
+_SYMBOL_FILES = ("seguisym.ttf", "DejaVuSans.ttf")
+#: Public names for other PDFs built on this module (the preview and review).
 FONT_REGULAR = _REGULAR
 FONT_BOLD = _BOLD
+
+#: Characters that shape the one before them and have no shape of their own.
+_INVISIBLE = re.compile("[\ufe0e\ufe0f\u200d]")
 
 
 class PdfExportError(RuntimeError):
@@ -133,6 +144,46 @@ def _register_fonts() -> None:
 
     addMapping(_REGULAR, 0, 0, _REGULAR)
     addMapping(_REGULAR, 1, 0, _BOLD)
+    _register_symbols()
+
+
+def _register_symbols() -> None:
+    from reportlab.lib.fonts import addMapping
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    for directory in _font_dirs():
+        for name in _SYMBOL_FILES:
+            path = directory / name
+            if not path.is_file():
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont(_SYMBOLS, str(path)))
+            except Exception:  # noqa: BLE001 - the PDF is still fine without it
+                continue
+            for bold in (0, 1):
+                addMapping(_SYMBOLS, bold, 0, _SYMBOLS)
+            return
+
+
+def printable(text: str) -> str:
+    """``text`` escaped for a Paragraph, in fonts that can draw every character."""
+    from reportlab.pdfbase import pdfmetrics
+
+    text = _INVISIBLE.sub("", text)
+    if _SYMBOLS not in pdfmetrics.getRegisteredFontNames():
+        return escape(text)
+    korean = pdfmetrics.getFont(_REGULAR).face.charToGlyph
+    symbols = pdfmetrics.getFont(_SYMBOLS).face.charToGlyph
+
+    def needs_symbols(character: str) -> bool:
+        return ord(character) not in korean and ord(character) in symbols
+
+    parts: list[str] = []
+    for missing, run in groupby(text, key=needs_symbols):
+        words = escape("".join(run))
+        parts.append(f'<font name="{_SYMBOLS}">{words}</font>' if missing else words)
+    return "".join(parts)
 
 
 # -- layout -------------------------------------------------------------------------
@@ -256,7 +307,7 @@ def build_pdf(
 
     The one place a PDF is written: the Korean font, the margins, the footer
     and the never-half-a-file rule are the same for the notes and for the
-    study pack. ``make_story`` is given the text frame's size so pictures can
+    study PDFs. ``make_story`` is given the text frame's size so pictures can
     be scaled to fit it.
     """
     try:

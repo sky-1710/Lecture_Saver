@@ -341,6 +341,24 @@ class TestCodexEngine:
         # No session log of the lecture is left behind on disk.
         assert "--ephemeral" in command
 
+    def test_each_picture_has_its_own_flag_and_cannot_swallow_the_prompt(self, tmp_path):
+        """--image takes as many values as follow it, "-" included."""
+        from lecture_saver.translate.codex_cli import CodexEngine
+
+        command = CodexEngine()._command(
+            tmp_path / "codex.exe", tmp_path / "answer.md", images=["p001.jpg", "p002.jpg"]
+        )
+        first = command.index("--image")
+        assert command[first:first + 4] == ["--image", "p001.jpg", "--image", "p002.jpg"]
+        assert command[first + 4] == "-m"
+        assert command[-1] == "-"
+
+    def test_no_pictures_no_flag(self, tmp_path):
+        from lecture_saver.translate.codex_cli import CodexEngine
+
+        command = CodexEngine()._command(tmp_path / "codex.exe", tmp_path / "answer.md")
+        assert "--image" not in command
+
     def test_the_users_own_codex_config_is_not_applied(self, tmp_path):
         """Their default model and MCP servers would both break a translation."""
         from lecture_saver.translate.codex_cli import CodexEngine
@@ -450,6 +468,58 @@ class TestCodexEngine:
         )
         assert "resume" not in commands[0]
         assert commands[1][1:3] == ["exec", "resume"]
+
+    def test_pictures_go_by_name_from_a_folder_of_their_own(self, tmp_path, monkeypatch):
+        """Codex is told no path to the project, or to this user's home."""
+        from pathlib import Path
+
+        from lecture_saver.translate import codex_cli
+        from lecture_saver.translate.codex_cli import CodexEngine
+
+        seen: dict[str, object] = {}
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, cmd, **kwargs):
+                seen["command"] = cmd
+                seen["copied"] = (Path(kwargs["cwd"]) / "p001.jpg").read_bytes()
+                Path(cmd[cmd.index("--output-last-message") + 1]).write_text(
+                    "answer", encoding="utf-8"
+                )
+
+            def communicate(self, input=None, timeout=None):
+                return "", ""
+
+        monkeypatch.setattr(codex_cli.subprocess, "Popen", FakeProcess)
+        (tmp_path / "codex.exe").write_bytes(b"")
+        picture = tmp_path / "secret project" / "p001.jpg"
+        picture.parent.mkdir()
+        picture.write_bytes(b"page one")
+
+        engine = CodexEngine(binary=tmp_path / "codex.exe", home=tmp_path)
+        assert engine.ask("prompt", cancel=threading.Event(), images=[picture]) == "answer"
+        assert seen["copied"] == b"page one"
+        command = seen["command"]
+        assert command[command.index("--image") + 1] == "p001.jpg"
+        assert not any("secret project" in part for part in command)
+
+    def test_an_engine_that_cannot_show_pictures_says_so(self):
+        from pathlib import Path
+
+        from lecture_saver.translate.engine import EngineAvailability, TranslationEngine
+
+        class Plain(TranslationEngine):
+            label = "Plain"
+
+            def availability(self):
+                return EngineAvailability(ready=True)
+
+            def translate(self, prompt, *, cancel):
+                return "answer"
+
+        with pytest.raises(TranslationError, match="cannot be shown pictures"):
+            Plain().ask("prompt", cancel=threading.Event(), images=[Path("p001.jpg")])
 
     def test_the_answer_is_read_from_the_file_not_the_chatter(self, tmp_path):
         from lecture_saver.translate.codex_cli import CodexEngine

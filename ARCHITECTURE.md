@@ -96,15 +96,16 @@ Fully local lecture video → transcript → slide-linked notes.
           pipeline.py            extract -> transcribe -> persist, resumable
         slides/
           slide_text.py          slide image -> text lines (Windows OCR)
-          pdf_text.py            lecture PDF -> the text of each page (QtPdf)
+          pdf_text.py            lecture PDF -> text and pictures of its pages (QtPdf)
           descriptors.py         Pass A: decode once, cache frame descriptors
           ink_analysis.py        shape of a change: thickness, replacement
           detector.py            Pass B: pure scoring + state machine
           diagnostics.py         per-candidate gate results
           diagnose.py            --diagnose CLI, replayed from the cache
           pipeline.py            Pass C: capture images, persist, resumable
-        study/                   study pack: preview + quiz (sends text too)
-          prompts.py             the two requests and their JSON schemas
+        study/                   the preview and the review's quiz (sends text too)
+          preview_prompt.md      the preview's instructions, word for word
+          prompts.py             the two requests; the quiz's JSON schema
           generator.py           ask, validate, shuffle answers, hand back
         ask/                     Ask AI: questions about the lecture (sends text too)
           __init__.py            a question as a turn of the lecture's session
@@ -127,6 +128,7 @@ Fully local lecture video → transcript → slide-linked notes.
           transcript_view.py     virtualised segment list, "Ask AI" on each line
           ask_panel.py           Ask AI chat under the video
           corrections_panel.py   the Typos tab: fix, keep or listen to each word
+          reference_row.py       attach the lecture's PDF, for two dialogs
           transcribe_panel.py    model options, progress, cancel
           slide_panel.py         slide navigator: thumbnails + detect controls
           workers.py             QThread wrappers around core pipelines
@@ -144,6 +146,8 @@ Fully local lecture video → transcript → slide-linked notes.
       slides.json         slide identities + appearance intervals
       corrections.json    typos an assistant suggested; the transcript is unaffected
       reference.json      the text of the lecture's PDF, if one was attached
+      reference_pages/    a picture of each of its pages, up to 60
+      study.json          the preview (Markdown) and the quiz, once made
       audio/lecture.wav   16 kHz mono, deletable, regenerable
       slides/001.jpg      representative image per slide
       captures.json       the user's screenshots: time, marking start, marks
@@ -657,7 +661,8 @@ join the word.
 **The PDF.** A slide that says "process state" settles what a transcript cannot.
 `slides/pdf_text.py` reads the text with QtPdf, which is PDFium and already in
 PySide6-Addons, so there is no new dependency; `reference.json` keeps the text
-and the file name, never the path or the file (§4). Real decks measured 200–500
+and the file name, never the path or the file (§4), and `reference_pages/` a
+picture of each page for the review (§13). Real decks measured 200–500
 characters a page with a text layer on nearly every page, so OCR was left out;
 a PDF of pictures says so instead (§32).
 
@@ -676,25 +681,69 @@ filler left alone, and every line parsed.
 
 ---
 
-## 13. Study pack (preview, notes, review quiz)
+## 13. Study: the preview and the review
 
-One PDF: 예습 (key points, terms, the lecture explained at a
-middle-school level), the existing slide + transcript notes, a 15-question
-English quiz, then answers with Korean explanations from a fresh page.
+Two PDFs, made one at a time, because they are read days apart. The preview
+(예습) is a lesson taught from the lecture's PDF and transcript. The review (복습)
+is the existing slide + transcript notes, a 15-question English quiz, then
+answers with Korean explanations from a fresh page.
 
-**Whole lecture, two requests.** Unlike translation it cannot be batched: a
-preview must know how the lecture ends, and a quiz must cover all of it.
+**What comes first.** A translation run is what finds the typos, and study
+material follows the transcript it is given, so `MainWindow._make_study_pdf`
+stops a lecture with no transcript, and tells one with slides untranslated to
+translate first. That one can go on anyway: a slide that will not translate must
+not lock this away. A lecture in Korean (`TRANSLATED_INTO`) has nothing to do.
+
+**The review sends pictures.** A diagram has no words for the text layer to give,
+so the quiz is also shown each page of the attached PDF. The PDF itself is not
+kept (§4), so `slides/pdf_text.py` draws the pages when it is attached, 1280 px
+on the long side, into `reference_pages/`, for the first 60 pages: a textbook
+would take minutes to draw and not fit in a request. These are the one thing
+beyond words that leaves the machine, and they are pages the user chose to
+attach, never frames of the video. `CodexEngine._run` copies them into its scratch
+folder and passes `--image p003.jpg`, relative, so no path reaches Codex, one flag
+each and before `-m`, because `--image` takes every value after it and would
+swallow the `-` that means stdin. The dialog names them whenever they would go,
+and a box keeps them home.
+
+**Whole lecture, one request each.** Unlike translation neither can be batched:
+a preview must know how the lecture ends, and a quiz must cover all of it.
 Measured lectures reach ~12k transcript tokens (85 min), well inside one
-request. Preview and quiz are separate requests so either can fail alone.
+request. Each is asked for only when its PDF is made, so a lecture studied only
+one way spends only that.
 
-**Structured, then checked.** Both use the engine's new `ask(..., schema=)`,
-which Codex enforces with `--output-schema`. The schemas follow strict mode
-(every property required, no extras); counts are enforced in
-`core/study.py`, not the schema, because `minItems` is not reliably accepted
-and a rejected schema fails the run. Validation drops what cannot be printed
-honestly — three options, an answer letter pointing nowhere, a slide number
-the lecture does not have — and refuses a quiz with fewer than 15 usable
-questions rather than printing a short one.
+**The preview's instructions are the user's, word for word.** They live in
+`study/preview_prompt.md`, not in code. They were written for a chat, so
+`prompts._PREVIEW_FORMAT` follows them with what a page needs: Markdown under
+fixed headings, flowcharts in the subset below, no LaTeX, no emoji, and the
+check questions' answers at the end, since a PDF cannot be asked for them later.
+The instructions number PART 1 to 5 and then a final summary, and say "PART 1 to
+7"; the format section settles that. The deck goes whole with `[p.N]` page
+numbers and the speech with `[00:12:34]` times, so a claim can name its source.
+Without a PDF the assistant is told so, and not to write as if it had seen one.
+
+**The preview is writing, the quiz is data.** The quiz uses `ask(..., schema=)`,
+which Codex enforces with `--output-schema`. The schema follows strict mode
+(every property required, no extras); counts are enforced in `core/study.py`,
+not the schema, because `minItems` is not reliably accepted and a rejected
+schema fails the run. Validation drops what cannot be printed honestly — three
+options, an answer letter pointing nowhere, a slide number the lecture does not
+have — and refuses a quiz with fewer than 15 usable questions rather than
+printing a short one. The preview is kept as the Markdown it came in: a lesson
+has no fields to check, so an answer is refused only when it is too short to be
+one, and everything else reaches the page.
+
+**Markdown and flowcharts are drawn here.** `export/markdown_pdf.py` reads what
+an assistant writes - headings, lists, tables, quotes, code - into ReportLab
+flowables, and picks out the `[교안 내용]`, `[교수님 설명]`, `[AI 보충 설명]`
+markers. A Mermaid renderer needs a browser, and no graph layout library is a
+dependency, so `export/flowchart.py` reads `flowchart` source and lays it out in
+layers: longest-path ranks after turning back edges, edges that skip a layer
+routed through it as boxes of no size, then barycentre sweeps for order and
+position. It is deterministic, so a PDF made again keeps its pictures. What
+cannot be read, or would be too small to read even turned on its side, prints as
+its source: nothing the assistant wrote is lost. Characters Malgun Gothic lacks
+(`✓`, `≈`, subscripts) come from a symbol font, `pdf.printable()`.
 
 **The application shuffles the answers.** Models place correct answers
 unevenly; `balance_answers` reorders each question's options with a seed
@@ -703,14 +752,14 @@ prints the same quiz. Questions whose options refer to each other ("Both A
 and B") are left alone.
 
 **Saved means free.** Each part is written to `study.json` on the UI thread
-as it arrives, with the fingerprint of the transcript it came from. Rebuilding
-the PDF reads it back and sends nothing. An edit to the *text* (not the
-timing) marks the parts stale, and the dialog offers — does not force — a
-rewrite, since most edits are a corrected word the quiz never asks about.
+as it arrives, before its PDF is laid out, with the fingerprint of the
+transcript it came from. Rebuilding the PDF reads it back and sends nothing. An
+edit to the *text* (not the timing) marks the part stale, and the dialog offers
+— does not force — a rewrite, since most edits are a corrected word.
 
-**Notes are not re-laid-out.** Part 2 is `pdf.notes_story()`, the same code
-as the notes PDF, and every PDF goes through `pdf.build_pdf()` for the font,
-footer and atomic write; the two can never drift apart.
+**Notes are not re-laid-out.** The review's notes are `pdf.notes_story()`, the
+same code as the notes PDF, and every PDF goes through `pdf.build_pdf()` for the
+font, footer and atomic write; the two can never drift apart.
 
 ---
 

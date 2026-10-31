@@ -160,6 +160,15 @@ class Settings:
     def translation_checks_typos(self, value: bool) -> None:
         self.set("translation_checks_typos", bool(value))
 
+    @property
+    def study_sends_page_pictures(self) -> bool:
+        """Whether the review's quiz is given pictures of the PDF's pages too."""
+        return bool(self._data.get("study_sends_page_pictures", True))
+
+    @study_sends_page_pictures.setter
+    def study_sends_page_pictures(self, value: bool) -> None:
+        self.set("study_sends_page_pictures", bool(value))
+
     # -- reading -----------------------------------------------------------
 
     @property

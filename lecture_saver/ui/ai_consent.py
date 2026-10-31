@@ -1,6 +1,6 @@
 """The one-time agreement before any lecture text is sent to an assistant.
 
-Translation, the study pack and Ask AI send the same thing - the transcript
+Translation, study material and Ask AI send the same thing - the transcript
 text - to the same place, so they share one agreement and one setting.
 Agreeing in any of them covers all three; the wording names each so nobody
 agrees to one and is surprised by another.
@@ -24,10 +24,11 @@ def consent_text(engine_label: str) -> str:
         "To translate the lecture, write study material from it, or answer your "
         "questions about it, the lecture's "
         f"<b>transcript text</b> is sent to {engine_label}. "
-        "That text leaves this computer. If you attach the lecture's PDF for the "
-        "typo check, the text of its pages goes too.<br><br>"
-        "<b>What is never sent:</b> the video, the audio, and the slide images. "
-        "Only the words.<br><br>"
+        "That text leaves this computer. If you attach the lecture's PDF, the "
+        "text of its pages goes too, and pictures of its pages go with the "
+        "review's quiz unless you turn that off.<br><br>"
+        "<b>What is never sent:</b> the video, the audio, and the slide images "
+        "taken from the video.<br><br>"
         "You can turn this off again at any time, and the rest of the application "
         "keeps working with no internet connection.<br><br>"
         "Send the transcript?"

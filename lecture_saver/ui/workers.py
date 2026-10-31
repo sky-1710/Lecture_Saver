@@ -42,8 +42,8 @@ __all__ = [
     "ProgressReport",
     "ProbeWorker",
     "SlideDetectionWorker",
-    "StudyPackResult",
-    "StudyPackWorker",
+    "StudyResult",
+    "StudyWorker",
     "TranscriptionWorker",
     "TranslationWorker",
     "run_in_thread",
@@ -361,35 +361,42 @@ class AskWorker(QObject):
         self.answered.emit(reply)
 
 
-class StudyPackWorker(QObject):
-    """Makes the study pack: asks for what is missing, then writes the PDF.
+class StudyWorker(QObject):
+    """Makes the preview or the review: asks if it must, then writes the PDF.
 
-    Parts are emitted on :attr:`part_ready` as each arrives so the window -
-    which owns the project - saves it before the next request goes out. The
-    worker keeps its own copy of the study set to build the PDF from, so it
-    never reads the live project from this thread.
+    What arrives is emitted on :attr:`part_ready` so the window - which owns
+    the project - saves it before the PDF is written. The worker keeps its own
+    copy of the study set to build the PDF from, so it never reads the live
+    project from this thread.
     """
 
     stage = Signal(str)  # "guide", "quiz" or "pdf"
     part_ready = Signal(str, object)  # ("guide", StudyGuide) / ("quiz", Quiz)
-    finished = Signal(object)  # StudyPackResult
+    finished = Signal(object)  # StudyResult
 
     def __init__(
         self,
         document: LectureDocument,
         engine: object,
         study: object,
-        parts: tuple[str, ...],
+        part: str,
         pdf_options: object,
         output_path: Path,
+        *,
+        ask: bool = True,
+        reference: ReferenceText | None = None,
+        pictures: tuple[Path, ...] = (),
     ) -> None:
         super().__init__()
         self._document = document
         self._engine = engine
         self._study = study
-        self._parts = parts
+        self._part = part
         self._pdf_options = pdf_options
         self._output_path = output_path
+        self._ask = ask
+        self._reference = reference
+        self._pictures = pictures
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -399,12 +406,12 @@ class StudyPackWorker(QObject):
     def run(self) -> None:
         from ..core.study import StudySet, transcript_fingerprint
         from ..export.pdf import PdfExportError
-        from ..export.study_pdf import write_study_pack
-        from ..study.generator import PART_GUIDE, StudyReport, run_study
+        from ..export.study_pdf import write_preview_pdf, write_review_pdf
+        from ..study.generator import PART_GUIDE, run_study
 
         study: StudySet = self._study  # type: ignore[assignment]
         fingerprint = transcript_fingerprint(self._document.segments)
-        result = StudyPackResult()
+        result = StudyResult()
 
         def on_part(part: str, value: object) -> None:
             if part == PART_GUIDE:
@@ -414,37 +421,39 @@ class StudyPackWorker(QObject):
             self.part_ready.emit(part, value)
 
         try:
-            report = (
-                run_study(
+            if self._ask:
+                self.stage.emit(self._part)
+                result.report = run_study(
                     self._document,
                     self._engine,  # type: ignore[arg-type]
-                    parts=self._parts,
+                    self._part,
+                    reference=self._reference,
+                    pictures=self._pictures,
                     on_part=on_part,
-                    on_stage=self.stage.emit,
                     cancel=self._cancel,
                 )
-                if self._parts else StudyReport()
-            )
-            result.report = report
-            if report.cancelled or not study.is_complete:
-                self.finished.emit(result)
-                return
+                if not result.report.made:
+                    self.finished.emit(result)
+                    return
             self.stage.emit("pdf")
-            write_study_pack(
-                self._document, study, self._pdf_options,  # type: ignore[arg-type]
-                self._output_path,
-            )
+            if self._part == PART_GUIDE:
+                write_preview_pdf(self._document, study, self._output_path)
+            else:
+                write_review_pdf(
+                    self._document, study, self._pdf_options,  # type: ignore[arg-type]
+                    self._output_path,
+                )
             result.pdf = self._output_path
         except PdfExportError as exc:
             result.pdf_error = str(exc)
         except Exception as exc:  # noqa: BLE001 - a worker must never crash the app
-            log.exception("Study pack failed")
+            log.exception("Study material failed")
             result.pdf_error = f"Unexpected failure:\n{exc}"
         self.finished.emit(result)
 
 
-class StudyPackResult:
-    """What the study pack run produced, for the message at the end."""
+class StudyResult:
+    """What a run produced, for the message at the end."""
 
     def __init__(self) -> None:
         from ..study.generator import StudyReport

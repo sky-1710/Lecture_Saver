@@ -1,12 +1,14 @@
-"""The lecture's PDF, as what the typo check knows about the course.
+"""The lecture's PDF, as what the assistant knows about the course.
 
 Whether "process date" is a mishearing is hard to tell from the transcript
 alone. A slide that says "process state" settles it. So the words of the PDF
 the professor handed out can be kept with the lecture and shown to the
-assistant as it checks the transcript. Only the text is kept: the PDF itself
-stays where it is (§4), and text is all that a prompt can carry.
+assistant as it checks the transcript, and the preview is taught from them.
+Only the text is kept: the PDF itself stays where it is (§4), and text is all
+that a prompt can carry.
 
-A deck is usually small enough to go along whole. A longer document would cost
+The preview is one request and gets every page. For the typo check a deck is
+usually small enough to go along whole too, but a longer document would cost
 more with every batch than the batch itself, so each batch gets the pages that
 share the most words with its speech. Words on half the pages or more are the
 deck's title and footer, which match everything and so say nothing.
@@ -54,11 +56,16 @@ class ReferenceText:
     def characters(self) -> int:
         return sum(len(page) for page in self.pages)
 
+    @property
+    def numbered_pages(self) -> list[tuple[int, str]]:
+        """Every page with text on it: (page number, text), in page order."""
+        return [(number, text) for number, text in enumerate(self.pages, 1) if text]
+
     def pages_for(
         self, speech: str, *, max_chars: int = DEFAULT_MAX_CHARS
     ) -> list[tuple[int, str]]:
         """The pages to show with ``speech``: (page number, text), in page order."""
-        pages = [(number, text) for number, text in enumerate(self.pages, 1) if text]
+        pages = self.numbered_pages
         if sum(len(text) for _, text in pages) <= max_chars:
             return pages
 

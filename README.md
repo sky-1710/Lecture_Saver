@@ -3,19 +3,22 @@
 Turn a lecture recording into a transcript and, eventually, slide-linked notes —
 **entirely on your own computer.**
 
-Video, audio and slide images never leave this machine. There is no cloud
+Video, audio and the slide images taken from the video never leave this
+machine. There is no cloud
 transcription service, no analytics, no telemetry, and no local server listening
 on a port. Transcription, slide detection and every export run on your own
 CPU (and, for the Turbo model, the Intel integrated GPU), and once a Whisper
 model is downloaded the application works offline.
 
 **Three features are an exception, and they are off until you turn them on.**
-*Translate with AI*, *Study pack* and *Ask AI* send the transcript **text** to
-an AI assistant — to translate it into Korean, to write a preview and a review
-quiz from it, or to answer your questions about it — because no local model on
-a laptop without a GPU does any of these well in reasonable time. If you attach
-the lecture's PDF for the typo check, the text of its pages goes too. The video, the audio and the slide images are never
-sent — only the words. The application asks, in as many words, before the first
+*Translate with AI*, *Study* and *Ask AI* send the transcript **text** to an AI
+assistant — to translate it into Korean, to write a preview and a review quiz
+from it, or to answer your questions about it — because no local model on a
+laptop without a GPU does any of these well in reasonable time. If you attach
+the lecture's PDF, the text of its pages goes too, and pictures of its pages go
+with the review's quiz unless you untick that. The video, the audio and the
+slide images taken from the video are never sent. The application asks, in as
+many words, before the first
 lecture is ever sent, and you can leave it switched off and translate by hand
 instead with *AI translation request*.
 
@@ -158,18 +161,33 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
    the request to a file for you to hand to an assistant yourself; paste the
    answer into *Import translation*. Either way each slide's translation
    appears under its transcript and in the PDF and Markdown.
-9. **Study pack.** One PDF to study from, in the order you use it:
-   **예습** (a preview to read before the lecture — the key points first,
-   the terms you need, then the whole lecture explained simply enough for a
-   middle-schooler, with everyday examples), then the **강의 노트** (each
-   slide with what was said), then a **15-question review quiz in English**,
-   with the answers and Korean explanations starting on the next page so they
-   are not in sight while you answer. The preview and the quiz are written by
-   Codex from the transcript text and saved in the project, so making the PDF
-   again — after fixing a line, or with other slide options — is instant and
-   uses no quota; if you edit the transcript afterwards the window offers to
-   write them again. The answers are shuffled across A–D by the application,
-   because models tend to put the right answer in the same place.
+9. **Study.** Two PDFs, made one at a time from the *Study* button or the File
+   menu, because they are read days apart. Transcribe and translate first: a
+   lecture without a transcript cannot go on, and a lecture with slides still
+   untranslated is told so, with *Translate now* or *Continue anyway*, because
+   the translation run is what finds the typos. A lecture given in Korean has
+   nothing to translate.
+   - **Preview (예습)**, `<lecture>_preview.pdf`, to read before the lecture.
+     Codex teaches it from the lecture's PDF and transcript: the big picture, a
+     concept map, the background the professor skips, each idea with why it is
+     needed, and one worked example, then a summary and check questions whose
+     answers start on a page of their own. Each point says whether it came from
+     the slides, the professor or the AI. Attach the PDF in the window; without
+     one it is taught from the transcript alone. Its instructions are
+     `lecture_saver/study/preview_prompt.md`, which you can edit.
+   - **Review (복습)**, `<lecture>_review.pdf`, for after it: the **강의 노트**
+     (each slide with what was said), then a **15-question quiz in English**,
+     with the answers and Korean explanations starting on the next page so they
+     are not in sight while you answer. Codex writes the quiz from the
+     transcript, the attached PDF's text and pictures of its pages, so it can
+     ask about diagrams; untick *Also send pictures of the PDF's pages* to send
+     words only. The application shuffles the answers across A–D, because
+     models tend to put the right answer in the same place.
+
+   What Codex wrote is saved in the project, so making a PDF again — after
+   fixing a line, or with other slide options — is instant and uses no quota;
+   if you edit the transcript afterwards the window offers to write it again.
+   Fix the typos first: what it writes follows the transcript it is given.
 10. **Search** (Ctrl+Shift+F, or the *Search* tab) to find where anything was
    said; click a result to jump to that slide and moment.
 11. **Ask AI** when something does not make sense. *Ask AI* under the video
@@ -479,8 +497,9 @@ to one language for the whole recording.
   was meant. Tick it off in the dialog if a lecture does not need it
 - **Attach the lecture's PDF** in the same dialog, and words are judged against
   its text: a suggestion can then say *강의 자료 p.3에 clock time으로 나옴*. The
-  PDF is read on this computer and only its text is kept, in `reference.json`, so
-  it is attached once per lecture. A PDF that is only pictures, like a scan, has
+  PDF is read on this computer and its text is kept, in `reference.json`, with a
+  picture of each page for the review, so it is attached once per lecture. The
+  file itself stays where it is. A PDF that is only pictures, like a scan, has
   no text to read and says so. Long documents send only the pages that share
   words with each batch, up to about 8,000 characters a batch
 - Nothing changes by itself. Suggestions wait on the **Typos** tab, which appears
@@ -553,7 +572,9 @@ Lecture 01/
   translations.json             imported slide translations
   corrections.json              typos the assistant suggested
   reference.json                the text of the lecture's PDF, if one is attached
+  reference_pages/p001.jpg …    a picture of each of its pages, for the first 60
   chat.json                     the Ask AI conversation
+  study.json                    the preview and the quiz, as the assistant wrote them
   captures.json                 screenshots: time, where marking began, marks
   captures/0001.jpg …           each screenshot as the video showed it, and
   captures/0001_marked.jpg …    with your marks drawn in (what gets printed)
@@ -565,6 +586,7 @@ Lecture 01/
   cache/frame_descriptors.npz   scanned frames (thumbnails + ink masks),
                                 so re-detection skips decoding
   exports/                      <lecture>_lecture_notes.pdf, <lecture>_screenshots.pdf,
+                                <lecture>_preview.pdf, <lecture>_review.pdf,
                                 <lecture>_transcript.txt/.md/...
   logs/
 ```
@@ -755,7 +777,7 @@ testable without a GUI or a lecture recording.
   Whisper weights. Pre-download a model, and the application never needs the
   internet again.
 
-### The one exception: *Translate with AI*, *Study pack* and *Ask AI*
+### The one exception: *Translate with AI*, *Study* and *Ask AI*
 
 Everything above holds with these switched off, which is how they ship. They
 share one agreement — agree in any of them and all three may send — and
@@ -766,11 +788,12 @@ switching it on changes this, and only this:
 | Transcript text (the words, slide by slide) | **yes** |
 | Slide numbers and their labels | **yes** |
 | Your questions, and the earlier turns of that lecture's chat (*Ask AI*) | **yes** |
-| The text of a PDF you attached, for the typo check of *Translate with AI* | **yes** |
-| The PDF file, its name and its pictures | no |
+| The text of a PDF you attached, for the typo check, the preview and the review | **yes** |
+| Pictures of that PDF's pages, for the review's quiz, unless you untick it | **yes** |
+| The PDF file and its name | no |
 | Video file | no |
 | Audio | no |
-| Slide images | no |
+| Slide images taken from the video, and your screenshots | no |
 | File names and paths | no |
 | Your name, e-mail or any identifier from the app | no |
 
@@ -780,7 +803,7 @@ switching it on changes this, and only this:
   account. Lecture Saver stores no API key and never sees your sign-in — it
   runs the program you already have and reads back what it prints.
 - Codex is run with `--sandbox read-only`, so it cannot touch your files.
-  Translation and the study pack also run with `--ephemeral`, so the lecture
+  Translation and *Study* also run with `--ephemeral`, so the lecture
   is not written into a session log on disk. *Ask AI* is the exception: a
   conversation is a Codex session, which Codex keeps in
   `%USERPROFILE%\.codex\sessions` on this computer (the text sent in it, and
@@ -795,10 +818,14 @@ the transcript of the part you asked about (or of the whole lecture, if you
 chose that) and, when a conversation has to be started again, its recent
 turns. Within one conversation each piece of transcript goes once.
 
-The study pack's preview and quiz are made from the same transcript text,
-in two requests of the whole lecture — an overview and a quiz both need to
-see all of it. The notes part of the study pack is built on your computer
-from your project, exactly like the notes PDF.
+The preview and the quiz are one request each, of the whole lecture — a lesson
+and a quiz both need to see all of it — and each is sent only when you make it.
+Both take the text of every page of the PDF you attached, and the quiz also takes
+pictures of the first 60 pages, each named only by its page and copied to a
+scratch folder first, so no path goes with it. The review's window says so when
+they would go. The notes in the review are built on your computer from your
+project, exactly like the notes PDF, and the concept maps are drawn on your
+computer too.
 
 To translate without sending anything, use *AI translation request* instead:
 it writes the lecture and the request to a file for you to carry to an

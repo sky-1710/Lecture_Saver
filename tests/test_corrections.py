@@ -390,6 +390,75 @@ class TestReferencePages:
         assert str(project.root) not in project.reference_file.read_text(encoding="utf-8")
 
 
+class TestDrawingAPdfsPages:
+    def _deck(self, tmp_path, pages=3):
+        return TestReadingAPdf()._pdf(tmp_path / "deck.pdf", [["words"]] * pages)
+
+    def test_each_page_becomes_a_picture_in_page_order(self, tmp_path):
+        from PIL import Image
+
+        from lecture_saver.slides.pdf_text import render_pdf_pages
+
+        folder = tmp_path / "pages"
+        assert render_pdf_pages(self._deck(tmp_path), folder) == 3
+        assert [p.name for p in sorted(folder.iterdir())] == [
+            "p001.jpg", "p002.jpg", "p003.jpg",
+        ]
+        with Image.open(folder / "p001.jpg") as picture:
+            assert max(picture.size) == 1280
+
+    def test_an_unpainted_page_is_white_and_not_black(self, tmp_path):
+        from PIL import Image
+
+        from lecture_saver.slides.pdf_text import render_pdf_pages
+
+        render_pdf_pages(self._deck(tmp_path), tmp_path / "pages")
+        with Image.open(tmp_path / "pages" / "p001.jpg") as picture:
+            assert min(picture.convert("RGB").getpixel((5, 5))) > 240
+
+    def test_the_words_are_in_the_picture(self, tmp_path):
+        from PIL import Image
+
+        from lecture_saver.slides.pdf_text import render_pdf_pages
+
+        render_pdf_pages(self._deck(tmp_path), tmp_path / "pages")
+        with Image.open(tmp_path / "pages" / "p001.jpg") as picture:
+            darkest, _ = picture.convert("L").getextrema()
+        assert darkest < 80
+
+    def test_a_long_document_stops_at_the_limit(self, tmp_path):
+        from lecture_saver.slides.pdf_text import render_pdf_pages
+
+        folder = tmp_path / "pages"
+        assert render_pdf_pages(self._deck(tmp_path, pages=5), folder, limit=2) == 2
+        assert len(list(folder.iterdir())) == 2
+
+
+class TestKeepingThePictures:
+    def _pictures(self, tmp_path, name="drawn"):
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "p001.jpg").write_bytes(b"one")
+        (folder / "p002.jpg").write_bytes(b"two")
+        return folder
+
+    def test_they_are_kept_with_the_lecture_in_page_order(self, project, tmp_path):
+        project.set_reference(ReferenceText("a.pdf", ("x",)), pictures=self._pictures(tmp_path))
+        assert [p.name for p in project.reference_pictures] == ["p001.jpg", "p002.jpg"]
+        assert len(Project.open(project.root).reference_pictures) == 2
+
+    def test_a_new_pdf_takes_the_old_ones_away(self, project, tmp_path):
+        project.set_reference(ReferenceText("a.pdf", ("x",)), pictures=self._pictures(tmp_path))
+        project.set_reference(ReferenceText("b.pdf", ("y",)))
+        assert project.reference_pictures == []
+
+    def test_removing_the_pdf_removes_them(self, project, tmp_path):
+        project.set_reference(ReferenceText("a.pdf", ("x",)), pictures=self._pictures(tmp_path))
+        project.clear_reference()
+        assert project.reference_pictures == []
+        assert not project.reference_pages_dir.exists()
+
+
 class TestReadingAPdf:
     def _pdf(self, path, pages):
         """A real PDF, with Korean in it, the way the notes export makes one."""
@@ -559,9 +628,9 @@ class TestTheDialog:
     def test_it_shows_what_is_attached(self, qapp, project, tmp_path):
         project.set_reference(ReferenceText("OS03.pdf", ("one", "two")))
         dialog, _ = self._dialog(project, tmp_path)
-        assert "OS03.pdf: 2 pages" in dialog._reference_label.text()
-        assert dialog._attach_button.text() == "Change PDF..."
-        assert dialog._detach_button.isEnabled()
+        assert "OS03.pdf: 2 pages" in dialog._reference.label.text()
+        assert dialog._reference.attach_button.text() == "Change PDF..."
+        assert dialog._reference.detach_button.isEnabled()
 
     def test_a_translated_lecture_is_told_how_to_check_it(self, qapp, project, tmp_path):
         project.import_translation("## Slide 1\n하나\n\n## Slide 2\n둘")
@@ -573,14 +642,14 @@ class TestTheDialog:
     def test_turning_the_check_off_turns_the_pdf_off(self, qapp, project, tmp_path):
         dialog, _ = self._dialog(project, tmp_path)
         dialog._check_typos.setChecked(False)
-        assert not dialog._attach_button.isEnabled()
+        assert not dialog._reference.attach_button.isEnabled()
 
     def test_removing_it(self, qapp, project, tmp_path):
         project.set_reference(ReferenceText("OS03.pdf", ("text",)))
         dialog, _ = self._dialog(project, tmp_path)
-        dialog._remove_reference()
+        dialog._reference.remove()
         assert project.reference.is_empty
-        assert "No PDF attached" in dialog._reference_label.text()
+        assert "No PDF attached" in dialog._reference.label.text()
 
     def test_a_pdf_that_cannot_be_used_is_explained_and_changes_nothing(
         self, qapp, project, tmp_path, monkeypatch
@@ -592,24 +661,28 @@ class TestTheDialog:
         warned: list[str] = []
         monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
         dialog, _ = self._dialog(project, tmp_path)
-        dialog._on_reference_read(PdfReadError("No text could be read."))
+        (project.root / "reference_pages.new").mkdir()
+        dialog._reference._on_read(PdfReadError("No text could be read."))
         assert warned == ["No text could be read."]
         assert project.reference.is_empty
+        assert not (project.root / "reference_pages.new").exists()
 
     def test_reading_a_real_pdf_in_the_background(self, qapp, project, tmp_path):
         from PySide6.QtCore import QCoreApplication, QElapsedTimer
 
         path = TestReadingAPdf()._pdf(tmp_path / "OS03.pdf", [["Process State"]])
         dialog, _ = self._dialog(project, tmp_path)
-        dialog.read_reference(path)
-        assert "Reading" in dialog._reference_label.text()
+        dialog._reference.read(path)
+        assert "Reading" in dialog._reference.label.text()
         timer = QElapsedTimer()
         timer.start()
-        while dialog._reading is not None and timer.elapsed() < 10000:
+        while dialog._reference.is_reading and timer.elapsed() < 10000:
             QCoreApplication.processEvents()
         assert project.reference.source == "OS03.pdf"
         assert "Process State" in project.reference.pages[0]
         assert Project.open(project.root).reference == project.reference
+        assert [p.name for p in project.reference_pictures] == ["p001.jpg"]
+        assert not (project.root / "reference_pages.new").exists()
 
     def _run(self, dialog, monkeypatch):
         """Start the dialog's run on its real thread and wait for the report."""
@@ -660,12 +733,12 @@ class TestTheDialog:
         path = TestReadingAPdf()._pdf(tmp_path / "OS03.pdf", [["Process State"]])
         dialog, settings = self._dialog(project, tmp_path)
         settings.translation_enabled = True
-        dialog.read_reference(path)
+        dialog._reference.read(path)
         dialog._start()
         assert not dialog.is_running
         timer = QElapsedTimer()
         timer.start()
-        while dialog._reading is not None and timer.elapsed() < 10000:
+        while dialog._reference.is_reading and timer.elapsed() < 10000:
             QCoreApplication.processEvents()
 
     def test_a_batch_saves_its_fixes_and_says_so(self, qapp, project, tmp_path, monkeypatch):

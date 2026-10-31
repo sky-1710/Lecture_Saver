@@ -202,8 +202,9 @@ class LectureView(QWidget):
     exportRequested = Signal()
     #: One-click export of the notes PDF and Markdown.
     quickExportRequested = Signal()
-    #: Make the study pack: preview, notes, review quiz.
-    studyPackRequested = Signal()
+    #: Make the PDF to read before the lecture, or the one for after it.
+    previewRequested = Signal()
+    reviewRequested = Signal()
     #: Translate the lecture here, with an AI assistant.
     translateRequested = Signal()
     #: Export the lecture with a Korean translation request on top.
@@ -268,13 +269,26 @@ class LectureView(QWidget):
             "Save the lecture notes as lecture_notes.pdf and transcript.md in the "
             "project's exports folder, with the options last used."
         )
-        self._study_pack_button = QPushButton("Study pack")
-        self._study_pack_button.setToolTip(
-            "One PDF to study from: a simple preview to read before the lecture, "
-            "the slide notes, and a 15-question review quiz with answers.\n"
-            "The preview and quiz are written by the assistant from the "
-            "transcript text; the video, audio and slide images are never sent."
+        self._preview_action = QAction("Preview (예습)...", self)
+        self._preview_action.setToolTip(
+            "A PDF to read before the lecture: the assistant teaches it from the "
+            "lecture's PDF and transcript.\nOnly their text is sent; the video, "
+            "audio and slide images are never sent."
         )
+        self._review_action = QAction("Review (복습)...", self)
+        self._review_action.setToolTip(
+            "A PDF for after the lecture: the slide notes and a 15-question quiz "
+            "with answers.\nThe assistant writes the quiz from the transcript and "
+            "the lecture's PDF, pictures of its pages included; the video, the "
+            "audio and the pictures taken from the video are never sent."
+        )
+        study_menu = QMenu(self)
+        study_menu.setToolTipsVisible(True)
+        study_menu.addAction(self._preview_action)
+        study_menu.addAction(self._review_action)
+        self._study_button = QPushButton("Study")
+        self._study_button.setMenu(study_menu)
+        self._study_button.setToolTip("Make a preview to read before the lecture, or a review")
         self._translate_button = QPushButton("Translate with AI")
         self._translate_button.setToolTip(
             "Translate the lecture into Korean here, slide by slide.\n"
@@ -312,7 +326,7 @@ class LectureView(QWidget):
         header.setSpacing(8)
         header.addLayout(titles, 1)
         header.addWidget(self._quick_export_button)
-        header.addWidget(self._study_pack_button)
+        header.addWidget(self._study_button)
         header.addWidget(self._translate_button)
         header.addWidget(self._more_button)
         header_bar = QFrame()
@@ -614,7 +628,8 @@ class LectureView(QWidget):
         self._panel.keywordsFromSlidesRequested.connect(self.keywordsFromSlidesRequested)
         self._relocate_button.clicked.connect(self.relocateRequested)
         self._quick_export_button.clicked.connect(self.quickExportRequested)
-        self._study_pack_button.clicked.connect(self.studyPackRequested)
+        self._preview_action.triggered.connect(self.previewRequested)
+        self._review_action.triggered.connect(self.reviewRequested)
         self._translate_button.clicked.connect(self.translateRequested)
         self._more_formats_action.triggered.connect(self.exportRequested)
         self._ai_request_menu_action.triggered.connect(self.aiRequestRequested)
@@ -1790,7 +1805,7 @@ class LectureView(QWidget):
 
     def set_export_enabled(self, enabled: bool) -> None:
         for button in (
-            self._quick_export_button, self._study_pack_button,
+            self._quick_export_button, self._study_button,
             self._translate_button, self._more_button,
         ):
             button.setEnabled(enabled)

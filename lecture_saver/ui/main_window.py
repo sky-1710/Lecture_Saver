@@ -195,9 +195,12 @@ class MainWindow(QMainWindow):
         )
         self._screenshots_export_action.setEnabled(False)
         file_menu.addAction(self._screenshots_export_action)
-        self._study_pack_action = QAction("Create &study pack...", self)
-        self._study_pack_action.setEnabled(False)
-        file_menu.addAction(self._study_pack_action)
+        self._preview_action = QAction("Create p&review (예습)...", self)
+        self._preview_action.setEnabled(False)
+        file_menu.addAction(self._preview_action)
+        self._review_action = QAction("Create r&eview (복습)...", self)
+        self._review_action.setEnabled(False)
+        file_menu.addAction(self._review_action)
         self._translate_action = QAction("&Translate with AI...", self)
         self._translate_action.setEnabled(False)
         file_menu.addAction(self._translate_action)
@@ -256,7 +259,8 @@ class MainWindow(QMainWindow):
         self._reveal_action.triggered.connect(self._reveal_project)
         self._export_action.triggered.connect(self._show_export)
         self._quick_export_action.triggered.connect(self._quick_export)
-        self._study_pack_action.triggered.connect(self._study_pack)
+        self._preview_action.triggered.connect(self._make_preview)
+        self._review_action.triggered.connect(self._make_review)
         self._screenshots_export_action.triggered.connect(self._export_screenshots)
         self._translate_action.triggered.connect(self._translate_with_ai)
         self._ai_request_action.triggered.connect(self._ai_translation_request)
@@ -286,7 +290,8 @@ class MainWindow(QMainWindow):
         self._lecture_view.exportRequested.connect(self._show_export)
         self._lecture_view.quickExportRequested.connect(self._quick_export)
         self._lecture_view.screenshotsExportRequested.connect(self._export_screenshots)
-        self._lecture_view.studyPackRequested.connect(self._study_pack)
+        self._lecture_view.previewRequested.connect(self._make_preview)
+        self._lecture_view.reviewRequested.connect(self._make_review)
         self._lecture_view.translateRequested.connect(self._translate_with_ai)
         self._lecture_view.aiRequestRequested.connect(self._ai_translation_request)
         self._lecture_view.importTranslationRequested.connect(self._import_translation)
@@ -418,7 +423,8 @@ class MainWindow(QMainWindow):
         self._export_action.setEnabled(True)
         self._quick_export_action.setEnabled(True)
         self._screenshots_export_action.setEnabled(True)
-        self._study_pack_action.setEnabled(True)
+        self._preview_action.setEnabled(True)
+        self._review_action.setEnabled(True)
         self._translate_action.setEnabled(True)
         self._ai_request_action.setEnabled(True)
         self._import_translation_action.setEnabled(True)
@@ -452,7 +458,8 @@ class MainWindow(QMainWindow):
         self._export_action.setEnabled(False)
         self._quick_export_action.setEnabled(False)
         self._screenshots_export_action.setEnabled(False)
-        self._study_pack_action.setEnabled(False)
+        self._preview_action.setEnabled(False)
+        self._review_action.setEnabled(False)
         self._translate_action.setEnabled(False)
         self._ai_request_action.setEnabled(False)
         self._import_translation_action.setEnabled(False)
@@ -1105,26 +1112,81 @@ class MainWindow(QMainWindow):
             ai_request=True,
         )
 
-    def _study_pack(self) -> None:
-        """Preview, notes and review quiz in one PDF."""
+    def _make_preview(self) -> None:
+        """A PDF to read before the lecture."""
+        from ..study.generator import PART_GUIDE
+
+        self._make_study_pdf(PART_GUIDE)
+
+    def _make_review(self) -> None:
+        """The notes and a quiz, in a PDF for after the lecture."""
+        from ..study.generator import PART_QUIZ
+
+        self._make_study_pdf(PART_QUIZ)
+
+    def _translation_settled(self) -> bool:
+        """Whether to go on: it is translated, or need not be, or the user says so.
+
+        A translation run is also what finds the words the transcription got
+        wrong, and study material follows the transcript it is given, so the
+        order matters. A Korean lecture has nothing to translate. The user may
+        still go on: a slide that will not translate must not lock this away.
+        """
+        from ..export.document import build_document
+        from ..translate.batching import TRANSLATED_INTO, translatable_sections
+
+        project = self.project
+        if project is None or project.transcript.language == TRANSLATED_INTO:
+            return True
+        if project.slides.appearances:
+            document = build_document(project)
+            total = len(translatable_sections(document))
+            missing = len(translatable_sections(document, skip=project.translated_slides()))
+            if not missing:
+                return True
+            state = f"{missing} of {total} slides have no translation yet."
+        else:
+            state = "This lecture has no slides yet, so it has no translation."
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Translate the lecture first")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(
+            f"{state}\n\nTranslate it first: that run also finds the words the "
+            "transcription got wrong, and this is written from the transcript as it "
+            "stands."
+        )
+        translate = box.addButton("Translate now", QMessageBox.ButtonRole.AcceptRole)
+        go_on = box.addButton("Continue anyway", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(translate)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is translate:
+            self._translate_with_ai()
+        return clicked is go_on
+
+    def _make_study_pdf(self, part: str) -> None:
         if self.project is None or self._busy:
             return
         if self.project.transcript.is_empty:
             QMessageBox.information(
                 self, "No transcript yet",
-                "Transcribe the lecture first - the study pack is written from it.",
+                "Transcribe the lecture first - this is written from it.",
             )
+            return
+        if not self._translation_settled():
             return
         # The same snapshot an export takes: pending edits flushed, the notes
         # options last used, and the folder the notes PDF goes to.
         snapshot = self._export_snapshot()
         if snapshot is None:
             return
-        from .study_dialog import StudyPackDialog
+        from .study_dialog import StudyDialog
 
         document, settings, output = snapshot
-        dialog = StudyPackDialog(
-            self.project, self.settings, document, settings.pdf, output, self
+        dialog = StudyDialog(
+            self.project, self.settings, document, settings.pdf, output, part, self
         )
         dialog.changed.connect(
             lambda: self.statusBar().showMessage("Study material saved", 6000)
@@ -1305,7 +1367,7 @@ class MainWindow(QMainWindow):
         has_project = enabled and self.project is not None
         for action in (
             self._export_action, self._quick_export_action, self._translate_action,
-            self._study_pack_action, self._screenshots_export_action,
+            self._preview_action, self._review_action, self._screenshots_export_action,
             self._ai_request_action, self._import_translation_action,
         ):
             action.setEnabled(has_project)

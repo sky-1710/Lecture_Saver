@@ -1,13 +1,13 @@
-"""Asking the assistant for the preview and the quiz, and checking what comes back.
+"""Asking the assistant for the preview or the quiz, and checking what comes back.
 
-Two requests, one after the other, each saved by the caller as soon as it
-arrives - the same arrangement as translation, for the same reason: if the
-quiz fails (a usage limit, a dropped connection) the preview already made is
-kept, and running again only asks for what is missing.
+One request per PDF: the preview before the lecture and the quiz after it are
+made when each is wanted. Whatever arrives is saved by the caller at once, the
+same arrangement as translation and for the same reason: a failure in writing
+the PDF must not cost the quota already spent.
 
 Like the translation runner, this module knows nothing of Qt or the project.
-It is handed a document snapshot and an engine, and reports each finished
-part through a callback.
+It is handed a document snapshot and an engine, and reports the finished part
+through a callback.
 """
 
 from __future__ import annotations
@@ -17,10 +17,12 @@ import logging
 import random
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
+from ..core.reference import ReferenceText
 from ..core.study import (
     ANSWER_LETTERS,
     Quiz,
@@ -31,7 +33,7 @@ from ..core.study import (
 )
 from ..export.document import LectureDocument
 from ..translate.engine import TranslationCancelled, TranslationEngine, TranslationError
-from .prompts import GUIDE_SCHEMA, QUIZ_SCHEMA, guide_prompt, quiz_prompt
+from .prompts import QUIZ_SCHEMA, preview_prompt, quiz_prompt
 
 log = logging.getLogger(__name__)
 
@@ -117,18 +119,25 @@ def _known_slides(document: LectureDocument) -> set[int] | None:
 
 
 def make_guide(
-    document: LectureDocument, engine: TranslationEngine, cancel: threading.Event
+    document: LectureDocument,
+    engine: TranslationEngine,
+    cancel: threading.Event,
+    reference: ReferenceText | None = None,
 ) -> StudyGuide:
-    answer = engine.ask(guide_prompt(document), cancel=cancel, schema=GUIDE_SCHEMA)
-    return StudyGuide.from_dict(
-        parse_json_answer(answer), known_slides=_known_slides(document)
-    )
+    return StudyGuide.from_answer(engine.ask(preview_prompt(document, reference), cancel=cancel))
 
 
 def make_quiz(
-    document: LectureDocument, engine: TranslationEngine, cancel: threading.Event
+    document: LectureDocument,
+    engine: TranslationEngine,
+    cancel: threading.Event,
+    reference: ReferenceText | None = None,
+    pictures: Sequence[Path] = (),
 ) -> Quiz:
-    answer = engine.ask(quiz_prompt(document), cancel=cancel, schema=QUIZ_SCHEMA)
+    answer = engine.ask(
+        quiz_prompt(document, reference, len(pictures)),
+        cancel=cancel, schema=QUIZ_SCHEMA, images=pictures,
+    )
     quiz = Quiz.from_dict(parse_json_answer(answer), known_slides=_known_slides(document))
     return balance_answers(quiz, transcript_fingerprint(document.segments))
 
@@ -144,51 +153,48 @@ class StudyReport:
         return not self.errors and not self.cancelled
 
 
-#: Called with ("guide", StudyGuide) or ("quiz", Quiz) the moment one is ready.
+#: Called with ("guide", StudyGuide) or ("quiz", Quiz) the moment it is ready.
 PartCallback = Callable[[str, object], None]
-#: Called with the part about to be requested.
-StageCallback = Callable[[str], None]
-
-#: Failures that would hit the second request exactly the same way.
-_FATAL_MARKERS = ("usage limit", "not signed in", "could not be found", "codex login")
 
 
 def run_study(
     document: LectureDocument,
     engine: TranslationEngine,
+    part: str,
     *,
-    parts: tuple[str, ...] = (PART_GUIDE, PART_QUIZ),
+    reference: ReferenceText | None = None,
+    pictures: Sequence[Path] = (),
     on_part: PartCallback | None = None,
-    on_stage: StageCallback | None = None,
     cancel: threading.Event | None = None,
 ) -> StudyReport:
-    """Make each part in ``parts``, handing each back as soon as it is checked."""
+    """Make ``part``, handing it back as soon as it is checked.
+
+    ``reference`` is the text of the lecture's PDF, which both are written from.
+    ``pictures`` are of its pages, and go with the quiz.
+    """
     stop = cancel or threading.Event()
     report = StudyReport()
-    makers = {PART_GUIDE: make_guide, PART_QUIZ: make_quiz}
-
-    for part in parts:
-        if stop.is_set():
-            report.cancelled = True
-            break
-        if on_stage is not None:
-            on_stage(part)
-        try:
-            value = makers[part](document, engine, stop)
-        except TranslationCancelled:
-            report.cancelled = True
-            break
-        except (TranslationError, StudyError) as exc:
-            log.warning("Study %s failed: %s", part, exc)
-            report.errors.append(str(exc))
-            if any(marker in str(exc).lower() for marker in _FATAL_MARKERS):
-                break
-            continue
-        except Exception as exc:  # noqa: BLE001 - one part must not take the other down
-            log.exception("Unexpected failure making the study %s", part)
-            report.errors.append(f"Unexpected failure:\n{exc}")
-            continue
-        report.made.append(part)
-        if on_part is not None:
-            on_part(part, value)
+    if stop.is_set():
+        report.cancelled = True
+        return report
+    value: object
+    try:
+        if part == PART_GUIDE:
+            value = make_guide(document, engine, stop, reference)
+        else:
+            value = make_quiz(document, engine, stop, reference, pictures)
+    except TranslationCancelled:
+        report.cancelled = True
+        return report
+    except (TranslationError, StudyError) as exc:
+        log.warning("Study %s failed: %s", part, exc)
+        report.errors.append(str(exc))
+        return report
+    except Exception as exc:  # noqa: BLE001 - a failure must reach the user as a message
+        log.exception("Unexpected failure making the study %s", part)
+        report.errors.append(f"Unexpected failure:\n{exc}")
+        return report
+    report.made.append(part)
+    if on_part is not None:
+        on_part(part, value)
     return report

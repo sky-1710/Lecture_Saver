@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from .alignment import Alignment, align
@@ -43,9 +44,11 @@ SLIDES_FILE = "slides.json"
 TRANSLATIONS_FILE = "translations.json"
 #: Words an assistant thinks the transcription got wrong.
 CORRECTIONS_FILE = "corrections.json"
-#: The text of the lecture's PDF, as background for the typo check.
+#: The text of the lecture's PDF, for the typo check and the preview.
 REFERENCE_FILE = "reference.json"
-#: The preview and the review quiz an assistant wrote for the study pack.
+#: Pictures of its pages, kept because the PDF itself is not.
+REFERENCE_PAGES_DIR = "reference_pages"
+#: The preview and the review's quiz an assistant wrote.
 STUDY_FILE = "study.json"
 #: Questions asked about the lecture and the assistant's answers.
 CHAT_FILE = "chat.json"
@@ -103,7 +106,7 @@ class Project:
         self.corrections = CorrectionSet()
         #: The text of the lecture's PDF. Empty until the user attaches one.
         self.reference = ReferenceText()
-        #: Study pack material. Empty until the user makes one.
+        #: The preview and the quiz. Empty until the user makes them.
         self.study = StudySet()
         #: The conversation with the assistant. Empty until a question is asked.
         self.chat = ChatLog()
@@ -135,6 +138,15 @@ class Project:
     @property
     def reference_file(self) -> Path:
         return self.root / REFERENCE_FILE
+
+    @property
+    def reference_pages_dir(self) -> Path:
+        return self.root / REFERENCE_PAGES_DIR
+
+    @property
+    def reference_pictures(self) -> list[Path]:
+        """Pictures of the attached PDF's pages, in page order."""
+        return sorted(self.reference_pages_dir.glob("p*.jpg"))
 
     @property
     def study_file(self) -> Path:
@@ -461,10 +473,18 @@ class Project:
             # What is left on disk only costs a few stale suggestions next time.
             log.warning("Could not remove %s", CORRECTIONS_FILE, exc_info=True)
 
-    def set_reference(self, reference: ReferenceText) -> None:
-        """Keep the text of the lecture's PDF with the lecture."""
+    def set_reference(self, reference: ReferenceText, pictures: Path | None = None) -> None:
+        """Keep the lecture's PDF with the lecture: its text, and its pages' pictures.
+
+        ``pictures`` is a folder made for this and is moved here. Without one
+        the pictures of whatever PDF was attached before go, as they are not of
+        this one.
+        """
         try:
             write_json_atomic(self.reference_file, reference.to_dict())
+            shutil.rmtree(self.reference_pages_dir, ignore_errors=True)
+            if pictures is not None:
+                pictures.replace(self.reference_pages_dir)
         except OSError as exc:
             raise ProjectError(f"Could not save {REFERENCE_FILE}:\n{exc}") from exc
         self.reference = reference
@@ -472,9 +492,18 @@ class Project:
     def clear_reference(self) -> None:
         try:
             self.reference_file.unlink(missing_ok=True)
+            shutil.rmtree(self.reference_pages_dir, ignore_errors=True)
         except OSError as exc:
             raise ProjectError(f"Could not remove {REFERENCE_FILE}:\n{exc}") from exc
         self.reference = ReferenceText()
+
+    def translated_slides(self) -> set[int]:
+        """Slides that already have a translation covering their interval."""
+        return {
+            appearance.appearance_id
+            for appearance in self.slides.appearances
+            if self.translations.for_appearance(appearance)
+        }
 
     def save_study(self) -> None:
         try:

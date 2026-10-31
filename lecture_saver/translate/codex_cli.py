@@ -67,10 +67,12 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -252,6 +254,7 @@ class CodexEngine(TranslationEngine):
         *,
         keep: bool = False,
         resume: str | None = None,
+        images: Sequence[str] = (),
     ) -> list[str]:
         model = ["-m", self.model or pick_model(self.home)]
         if resume:
@@ -279,6 +282,10 @@ class CodexEngine(TranslationEngine):
             # The model is held to this JSON schema, so the answer is data to
             # validate rather than prose to scrape.
             cmd += ["--output-schema", str(schema_file)]
+        # Each with its own flag and the model after them: --image takes as many
+        # values as follow it, and would otherwise swallow the "-" below.
+        for name in images:
+            cmd += ["--image", name]
         # A trailing "-" tells Codex the prompt arrives on stdin.
         return [*cmd, *model, "-"]
 
@@ -291,8 +298,9 @@ class CodexEngine(TranslationEngine):
         *,
         cancel: threading.Event,
         schema: dict[str, Any] | None = None,
+        images: Sequence[Path] = (),
     ) -> str:
-        return self._run(prompt, cancel, schema=schema)
+        return self._run(prompt, cancel, schema=schema, images=images)
 
     def converse(
         self, prompt: str, *, session: str | None = None, cancel: threading.Event
@@ -313,6 +321,7 @@ class CodexEngine(TranslationEngine):
         keep: bool = False,
         resume: str | None = None,
         session_out: list[str] | None = None,
+        images: Sequence[Path] = (),
     ) -> str:
         path = self.resolve()
         # Codex treats its working directory as the workspace root. A scratch
@@ -329,10 +338,17 @@ class CodexEngine(TranslationEngine):
             if schema is not None:
                 schema_file = workspace / "schema.json"
                 schema_file.write_text(json.dumps(schema), encoding="utf-8")
+            # Copied here and named from here, so that no path to the project,
+            # or to this user's home, is in what Codex is told.
+            for image in images:
+                shutil.copy(image, workspace / image.name)
             new_session = keep and not resume
             try:
                 process = subprocess.Popen(
-                    self._command(path, answer_file, schema_file, keep=keep, resume=resume),
+                    self._command(
+                        path, answer_file, schema_file, keep=keep, resume=resume,
+                        images=[image.name for image in images],
+                    ),
                     cwd=str(workspace),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
