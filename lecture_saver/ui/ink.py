@@ -99,7 +99,7 @@ TOOL_TIPS = {
     TOOL_UNDERLINE: "Drag under words to underline them. A nearly level drag is drawn level.",
     TOOL_HIGHLIGHT: "Drag a box over what matters - or drag along one line of text to "
                     "highlight that line.",
-    TOOL_MEMO: "Click where the note goes and type; Enter keeps it, Space+Enter "
+    TOOL_MEMO: "Click where the note goes and type; Enter keeps it, Shift+Enter "
                "starts a new line, Esc drops it.\n"
                "Drag a memo with this tool to move it, or its right edge to make it "
                "wider or narrower; click it to change it - or double-click it with "
@@ -568,11 +568,7 @@ KEEPS_MEMO_OPEN = "keepsMemoOpen"
 class _MemoEditor(QPlainTextEdit):
     """The box a memo is typed into, placed where it will appear.
 
-    Enter keeps the memo; Space and Enter together start a new line instead.
-    That goes by the text, not the keys: a space before the cursor is what is
-    left here both by a Space tapped just before Enter and by one still held
-    down, and by a Space the Korean input method keeps to itself to finish a
-    syllable. Shift+Enter starts a new line too, as in the question box.
+    Enter keeps the memo; Shift+Enter starts a new line, as in the question box.
     """
 
     committed = Signal()
@@ -601,35 +597,11 @@ class _MemoEditor(QPlainTextEdit):
             self._done = True
             self.cancelled.emit()
             return
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            # Enter stayed down after a new line: the next press, not a repeat
-            # of this one, is what keeps the memo.
-            if event.isAutoRepeat():
-                return
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier or self._asks_for_line():
-                self._new_line()
-            else:
-                self._commit()
+        enter = event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        if enter and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self._commit()
             return
         super().keyPressEvent(event)
-
-    def _asks_for_line(self) -> bool:
-        cursor = self.textCursor()
-        return not cursor.hasSelection() and self._space_before(cursor)
-
-    def _space_before(self, cursor: QTextCursor) -> bool:
-        return self.document().characterAt(cursor.position() - 1) == " "
-
-    def _new_line(self) -> None:
-        """Break the line at the cursor; the spaces that asked for it go."""
-        cursor = self.textCursor()
-        cursor.beginEditBlock()
-        cursor.removeSelectedText()
-        while self._space_before(cursor):
-            cursor.deletePreviousChar()
-        cursor.insertBlock()
-        cursor.endEditBlock()
-        self.setTextCursor(cursor)
 
     def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802 - Qt naming
         super().focusOutEvent(event)
@@ -1170,7 +1142,7 @@ class InkCanvas(QWidget):
         )
         editor = _MemoEditor(self)
         editor.setFont(memo_font(rect, self._memo_size))
-        editor.setPlaceholderText("Type a memo: Enter keeps it, Space+Enter adds a line")
+        editor.setPlaceholderText("Type a memo: Enter keeps it, Shift+Enter adds a line")
         editor.setText(text)
         editor.committed.connect(self.commit_memo)
         editor.cancelled.connect(self.cancel_memo)

@@ -16,7 +16,7 @@ os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
 pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QKeyEvent  # noqa: E402
+from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtMultimedia import QVideoFrame  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
@@ -616,94 +616,56 @@ class TestMemoLines:
         return canvas._memo_editor
 
     @staticmethod
-    def enter(editor, *, repeated=False):
-        QApplication.sendEvent(editor, QKeyEvent(
-            QKeyEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier,
-            "\r", repeated,
-        ))
+    def new_line(editor, key=Qt.Key.Key_Return):
+        QTest.keyClick(editor, key, Qt.KeyboardModifier.ShiftModifier)
 
-    def test_space_then_enter_starts_a_new_line(self, canvas, editor):
-        QTest.keyClicks(editor, "first ")
-        QTest.keyClick(editor, Qt.Key.Key_Return)
+    def test_shift_enter_starts_a_new_line(self, canvas, editor):
+        QTest.keyClicks(editor, "first")
+        self.new_line(editor)
         assert canvas.is_typing and editor.text() == "first\n"
         QTest.keyClicks(editor, "second")
         QTest.keyClick(editor, Qt.Key.Key_Return)
         assert [m.text for m in canvas.marks] == ["first\nsecond"]
         assert not canvas.is_typing
 
-    def test_space_held_down_while_enter_is_pressed_is_a_new_line_too(self, canvas, editor):
-        QTest.keyClicks(editor, "first")
-        # The key repeats while it is down, then Enter comes with it still down.
-        for repeated in (False, True, True):
-            QApplication.sendEvent(editor, QKeyEvent(
-                QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier,
-                " ", repeated,
-            ))
-        self.enter(editor)
-        assert canvas.is_typing and editor.text() == "first\n"
-
     def test_enter_alone_still_keeps_the_memo(self, canvas, editor):
         QTest.keyClicks(editor, "kept")
         QTest.keyClick(editor, Qt.Key.Key_Return)
         assert not canvas.is_typing and [m.text for m in canvas.marks] == ["kept"]
 
+    def test_enter_after_a_space_keeps_the_memo_too(self, canvas, editor):
+        QTest.keyClicks(editor, "kept ")
+        QTest.keyClick(editor, Qt.Key.Key_Return)
+        assert not canvas.is_typing and [m.text for m in canvas.marks] == ["kept"]
+
     def test_the_keypads_enter_does_the_same(self, canvas, editor):
-        QTest.keyClicks(editor, "first ")
-        QTest.keyClick(editor, Qt.Key.Key_Enter)
+        QTest.keyClicks(editor, "first")
+        self.new_line(editor, Qt.Key.Key_Enter)
         assert canvas.is_typing and editor.text() == "first\n"
         QTest.keyClick(editor, Qt.Key.Key_Enter)
         assert not canvas.is_typing
 
-    def test_shift_enter_starts_a_new_line_without_a_space(self, canvas, editor):
-        QTest.keyClicks(editor, "first")
-        QTest.keyClick(editor, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
-        assert canvas.is_typing and editor.text() == "first\n"
-
     def test_enter_on_the_empty_new_line_keeps_the_memo_without_it(self, canvas, editor):
-        QTest.keyClicks(editor, "first ")
-        QTest.keyClick(editor, Qt.Key.Key_Return)
+        QTest.keyClicks(editor, "first")
+        self.new_line(editor)
         QTest.keyClick(editor, Qt.Key.Key_Return)
         assert not canvas.is_typing and [m.text for m in canvas.marks] == ["first"]
 
-    def test_enter_kept_down_after_a_new_line_does_not_keep_the_memo(self, canvas, editor):
-        QTest.keyClicks(editor, "first ")
-        self.enter(editor)
-        self.enter(editor, repeated=True)
-        self.enter(editor, repeated=True)
-        assert canvas.is_typing and editor.text() == "first\n"
-
-    def test_a_space_only_counts_right_before_the_cursor(self, canvas, editor):
-        QTest.keyClicks(editor, "two words")
-        QTest.keyClick(editor, Qt.Key.Key_Return)
-        assert not canvas.is_typing and [m.text for m in canvas.marks] == ["two words"]
-
     def test_a_new_line_can_go_in_the_middle(self, canvas, editor):
-        QTest.keyClicks(editor, "first second")
+        QTest.keyClicks(editor, "firstsecond")
         for _ in "second":
             QTest.keyClick(editor, Qt.Key.Key_Left)
-        QTest.keyClick(editor, Qt.Key.Key_Return)
+        self.new_line(editor)
         assert editor.text() == "first\nsecond"
-
-    def test_undo_takes_back_the_space_and_the_new_line_as_one(self, canvas, editor):
-        QTest.keyClicks(editor, "first ")
-        QTest.keyClick(editor, Qt.Key.Key_Return)
-        editor.undo()
-        assert editor.text() == "first "
-
-    def test_enter_with_words_selected_keeps_the_memo(self, canvas, editor):
-        QTest.keyClicks(editor, "first second")
-        editor.selectAll()
-        QTest.keyClick(editor, Qt.Key.Key_Return)
-        assert not canvas.is_typing and [m.text for m in canvas.marks] == ["first second"]
 
     def test_the_box_grows_with_each_line_and_shows_them_all(self, canvas, editor):
         one_line = editor.height()
-        QTest.keyClicks(editor, "first ")
-        QTest.keyClick(editor, Qt.Key.Key_Return)
+        QTest.keyClicks(editor, "first")
+        self.new_line(editor)
         two_lines = editor.height()
         assert two_lines > one_line
-        QTest.keyClicks(editor, "second ")
-        QTest.keyClick(editor, Qt.Key.Key_Return)
+        QTest.keyClicks(editor, "second")
+        self.new_line(editor)
         assert editor.height() > two_lines
         assert editor.verticalScrollBar().maximum() == 0
 
@@ -712,8 +674,8 @@ class TestMemoLines:
         QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(100, 440))
         editor = canvas._memo_editor
         for _ in range(4):
-            QTest.keyClicks(editor, "line ")
-            QTest.keyClick(editor, Qt.Key.Key_Return)
+            QTest.keyClicks(editor, "line")
+            self.new_line(editor)
         assert editor.geometry().bottom() < 450
         assert editor.y() < 440 - editor.height() / 2
 
@@ -738,8 +700,8 @@ class TestMemoLines:
         assert Mark.from_dict(memo.to_dict()) == memo
 
     def test_the_picture_shows_through_the_box_and_both_lines_are_painted(self, canvas, editor):
-        QTest.keyClicks(editor, "first ")
-        QTest.keyClick(editor, Qt.Key.Key_Return)
+        QTest.keyClicks(editor, "first")
+        self.new_line(editor)
         QTest.keyClicks(editor, "second")
         QApplication.processEvents()
         shot = editor.geometry()
@@ -938,8 +900,8 @@ class TestPlayerDrawing:
         canvas.open_memo(0.2, 0.2)
         QApplication.processEvents()
         editor = canvas._memo_editor
-        QTest.keyClicks(editor, "s1 d ")
-        QTest.keyClick(editor, Qt.Key.Key_Return)
+        QTest.keyClicks(editor, "s1 d")
+        QTest.keyClick(editor, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
         QTest.keyClicks(editor, "next")
         QTest.keyClick(editor, Qt.Key.Key_Return)
         assert [m.text for m in canvas.marks] == ["s1 d\nnext"]

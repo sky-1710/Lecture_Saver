@@ -439,10 +439,9 @@ to one language for the whole recording.
   drag along one line of text to band that line; **eraser** (4). Pressing the
   button goes back to the kind used last, its arrow picks another. **Memo** (5)
   is typed where you click as plain text, no box: Enter keeps it, Esc drops
-  it, and Space+Enter starts a new line - holding Space or tapping it just
-  before Enter, and Shift+Enter does the same. A memo kept is changed by
-  clicking it with the memo tool or double-clicking it with any. **Drag** a
-  memo with the memo tool to move it,
+  it, and Shift+Enter starts a new line. A memo kept is changed by clicking it
+  with the memo tool or double-clicking it with any. **Drag** a memo with the
+  memo tool to move it,
   or drag its **right edge** to make the box wider or narrower - its text
   wraps to the width, and the box keeps it from then on (one never resized
   fits its text). Pointing at a memo with the memo tool frames it, with a
