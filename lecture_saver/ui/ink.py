@@ -42,14 +42,16 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QResizeEvent,
+    QTextCursor,
+    QTextOption,
 )
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMenu,
+    QPlainTextEdit,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -97,7 +99,8 @@ TOOL_TIPS = {
     TOOL_UNDERLINE: "Drag under words to underline them. A nearly level drag is drawn level.",
     TOOL_HIGHLIGHT: "Drag a box over what matters - or drag along one line of text to "
                     "highlight that line.",
-    TOOL_MEMO: "Click where the note goes and type; Enter keeps it, Esc drops it.\n"
+    TOOL_MEMO: "Click where the note goes and type; Enter keeps it, Shift+Enter "
+               "starts a new line, Esc drops it.\n"
                "Drag a memo with this tool to move it, or its right edge to make it "
                "wider or narrower; click it to change it - or double-click it with "
                "any tool.",
@@ -227,6 +230,20 @@ def memo_min_width(mark: Mark, rect: QRectF) -> float:
     return font.pixelSize() * 3.0 + 2 * _memo_padding(font)
 
 
+def _fitted_wrap(font: QFont, rect: QRectF) -> float:
+    """How wide a memo's text may run, in pixels, when no width was set for it."""
+    return max(rect.width() * MEMO_MAX_WIDTH, font.pixelSize() * 5.0)
+
+
+def _wrapped_text(text: str, font: QFont, wrap: float) -> QRectF:
+    """The space ``text`` takes wrapped to ``wrap`` pixels, as a memo is painted."""
+    return QFontMetricsF(font).boundingRect(
+        QRectF(0, 0, wrap, 100_000),
+        int(Qt.AlignmentFlag.AlignLeft) | int(Qt.TextFlag.TextWordWrap),
+        text,
+    )
+
+
 def memo_box(mark: Mark, rect: QRectF) -> QRectF:
     """Where a memo's note is drawn: its text wrapped, kept inside the picture.
 
@@ -239,12 +256,8 @@ def memo_box(mark: Mark, rect: QRectF) -> QRectF:
         outer = min(rect.width(), max(mark.width * rect.width(), memo_min_width(mark, rect)))
         wrap = outer - 2 * pad
     else:
-        wrap = max(rect.width() * MEMO_MAX_WIDTH, font.pixelSize() * 5.0)
-    text = QFontMetricsF(font).boundingRect(
-        QRectF(0, 0, wrap, 100_000),
-        int(Qt.AlignmentFlag.AlignLeft) | int(Qt.TextFlag.TextWordWrap),
-        mark.text,
-    )
+        wrap = _fitted_wrap(font, rect)
+    text = _wrapped_text(mark.text, font, wrap)
     width = outer if mark.width else text.width() + 2 * pad
     box = QRectF(to_pixels(mark.x1, mark.y1, rect), QSizeF(width, text.height() + 2 * pad))
     # A note clicked near the right or bottom edge grows back into the picture.
@@ -552,8 +565,11 @@ def history_icon(*, redo: bool) -> QIcon:
 KEEPS_MEMO_OPEN = "keepsMemoOpen"
 
 
-class _MemoEditor(QLineEdit):
-    """The box a memo is typed into, placed where it will appear."""
+class _MemoEditor(QPlainTextEdit):
+    """The box a memo is typed into, placed where it will appear.
+
+    Enter keeps the memo; Shift+Enter starts a new line, as in the question box.
+    """
 
     committed = Signal()
     cancelled = Signal()
@@ -561,12 +577,29 @@ class _MemoEditor(QLineEdit):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self._done = False
-        self.returnPressed.connect(self._commit)
+        self.setFrameShape(QPlainTextEdit.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTabChangesFocus(True)
+        # Set out as the memo will be painted, so no line moves when it is kept.
+        self.setWordWrapMode(QTextOption.WrapMode.WordWrap)
+        self.document().setDocumentMargin(0)
+
+    def text(self) -> str:
+        return self.toPlainText()
+
+    def setText(self, text: str) -> None:  # noqa: N802 - as QLineEdit names it
+        self.setPlainText(text)
+        self.moveCursor(QTextCursor.MoveOperation.End)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt naming
         if event.key() == Qt.Key.Key_Escape:
             self._done = True
             self.cancelled.emit()
+            return
+        enter = event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        if enter and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self._commit()
             return
         super().keyPressEvent(event)
 
@@ -1109,10 +1142,11 @@ class InkCanvas(QWidget):
         )
         editor = _MemoEditor(self)
         editor.setFont(memo_font(rect, self._memo_size))
-        editor.setPlaceholderText("Type a memo, Enter to keep it")
+        editor.setPlaceholderText("Type a memo: Enter keeps it, Shift+Enter adds a line")
         editor.setText(text)
         editor.committed.connect(self.commit_memo)
         editor.cancelled.connect(self.cancel_memo)
+        editor.textChanged.connect(self._place_memo_editor)
         self._memo_editor = editor
         self._style_memo_editor()
         self.textSizeShown.emit(self._memo_size)
@@ -1132,22 +1166,30 @@ class InkCanvas(QWidget):
         font = memo_font(rect, self._memo_size)
         pad = round(_memo_padding(font))
         editor.setStyleSheet(
-            f"QLineEdit, QLineEdit:focus {{ background: transparent; border: none;"
-            f" color: {self._memo_ink}; padding: {pad}px {max(0, pad - 2)}px;"
+            f"QPlainTextEdit, QPlainTextEdit:focus {{ background: transparent; border: none;"
+            f" color: {self._memo_ink}; padding: {pad}px;"
             f" font-size: {font.pixelSize()}px; font-weight: {int(font.weight())}; }}"
         )
 
     def _place_memo_editor(self) -> None:
+        """Put the box where the memo goes, as tall as what is typed in it."""
         editor = self._memo_editor
         rect = self.picture_rect()
         if editor is None or rect.isEmpty():
             return
-        editor.setFont(memo_font(rect, self._memo_size))
-        width = int(max(rect.width() * MEMO_MAX_WIDTH, 150))
+        font = memo_font(rect, self._memo_size)
+        editor.setFont(font)
+        pad = round(_memo_padding(font))
+        width = int(max(_fitted_wrap(font, rect) + 2 * pad, 150))
         marks = self._sheet.marks
         if 0 <= self._memo_index < len(marks) and marks[self._memo_index].width:
             width = int(max(memo_box(marks[self._memo_index], rect).width(), 60))
-        height = editor.sizeHint().height()
+        # The space holds open the empty line a new line ends on. A text box
+        # stops scrolling only with its last line's leading, which a painted
+        # memo leaves off, and one pixel more.
+        typed = _wrapped_text(f"{editor.text()} ", font, width - 2 * pad)
+        needed = typed.height() + QFontMetricsF(font).leading() + 1
+        height = int(min(math.ceil(needed) + 2 * pad, rect.height()))
         point = to_pixels(*self._memo_at, rect)
         left = int(min(max(point.x(), rect.left()), rect.right() - width))
         top = int(min(max(point.y(), rect.top()), rect.bottom() - height))
