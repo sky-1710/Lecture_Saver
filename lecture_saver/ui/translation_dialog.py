@@ -198,9 +198,15 @@ class TranslationDialog(QDialog):
             return False
         self.changed.emit()
         self._text.clear()
+        typos = len(result.corrections)
+        found = (
+            f" {typos} possible typo{'s' if typos != 1 else ''} to look through on "
+            "the Typos tab."
+            if typos else ""
+        )
         self._preview.setText(
             f"Imported translations for {len(result.matched)} slides "
-            f"({describe_numbers([m.appearance_id for m in result.matched])}). "
+            f"({describe_numbers([m.appearance_id for m in result.matched])}).{found} "
             "Paste the next part, or close."
         )
         set_role(self._preview, Role.SUCCESS)

@@ -13,7 +13,8 @@ model is downloaded the application works offline.
 *Translate with AI*, *Study pack* and *Ask AI* send the transcript **text** to
 an AI assistant — to translate it into Korean, to write a preview and a review
 quiz from it, or to answer your questions about it — because no local model on
-a laptop without a GPU does any of these well in reasonable time. The video, the audio and the slide images are never
+a laptop without a GPU does any of these well in reasonable time. If you attach
+the lecture's PDF for the typo check, the text of its pages goes too. The video, the audio and the slide images are never
 sent — only the words. The application asks, in as many words, before the first
 lecture is ever sent, and you can leave it switched off and translate by hand
 instead with *AI translation request*.
@@ -470,6 +471,36 @@ to one language for the whole recording.
   `%APPDATA%\LectureSaver\settings.json` to use another model for questions
   than for translation
 
+### Typo check ✅
+
+- *Translate with AI* also looks for what the transcription got wrong: words
+  misheard as other real words ("a learning program", "cloud time"), which no
+  spelling checker can catch, and broken ones ("BIOck"). The Korean follows what
+  was meant. Tick it off in the dialog if a lecture does not need it
+- **Attach the lecture's PDF** in the same dialog, and words are judged against
+  its text: a suggestion can then say *강의 자료 p.3에 clock time으로 나옴*. The
+  PDF is read on this computer and only its text is kept, in `reference.json`, so
+  it is attached once per lecture. A PDF that is only pictures, like a scan, has
+  no text to read and says so. Long documents send only the pages that share
+  words with each batch, up to about 8,000 characters a batch
+- Nothing changes by itself. Suggestions wait on the **Typos** tab, which appears
+  beside *Search* with a count: the line, the words picked out, the fix, the
+  reason, and whether the assistant is *sure* or wants it checked by ear. *Fix*
+  changes the line, *Keep as it is* leaves it and is not asked again, *Listen*
+  plays the line with the list left open. *Fix N sure* takes every sure one in
+  one step
+- In the transcript the same words carry a wavy underline - red when sure,
+  amber when not - with the suggestion in the tooltip and the choices on the
+  right-click menu
+- A fix is an ordinary edit: it goes to the corrected text, the original stays,
+  Undo takes it back and the suggestion returns. Typing the word yourself ends
+  the suggestion too. Exports use the corrected text as always
+- What an answer reports is checked first: words that are not in the transcript
+  near the line they were reported under are dropped
+- To check a lecture already translated, tick *Translate slides that already
+  have a translation again*. The by-hand translation request asks for the same
+  lines, and *Import translation* picks them up
+
 ### Translation import ✅
 
 - *Import translation* reads an AI assistant's answer to the translation
@@ -520,6 +551,8 @@ Lecture 01/
   project.json                  video reference, metadata, stage states, settings
   transcript.json               the authoritative transcript
   translations.json             imported slide translations
+  corrections.json              typos the assistant suggested
+  reference.json                the text of the lecture's PDF, if one is attached
   chat.json                     the Ask AI conversation
   captures.json                 screenshots: time, where marking began, marks
   captures/0001.jpg …           each screenshot as the video showed it, and
@@ -733,6 +766,8 @@ switching it on changes this, and only this:
 | Transcript text (the words, slide by slide) | **yes** |
 | Slide numbers and their labels | **yes** |
 | Your questions, and the earlier turns of that lecture's chat (*Ask AI*) | **yes** |
+| The text of a PDF you attached, for the typo check of *Translate with AI* | **yes** |
+| The PDF file, its name and its pictures | no |
 | Video file | no |
 | Audio | no |
 | Slide images | no |

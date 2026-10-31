@@ -81,6 +81,8 @@ Fully local lecture video → transcript → slide-linked notes.
           captures.py            screenshots + their marks; undo for a sheet
           sentences.py           where a line may be cut so sentences survive
           keywords.py            slide text -> course terms for Whisper's hints
+          corrections.py         suggested typo fixes, checked against the lines
+          reference.py           the lecture PDF's text; pages for one batch
           chat.py                the Ask AI conversation (chat.json)
           project.py             project dir layout, create/load/save
         media/
@@ -94,6 +96,7 @@ Fully local lecture video → transcript → slide-linked notes.
           pipeline.py            extract -> transcribe -> persist, resumable
         slides/
           slide_text.py          slide image -> text lines (Windows OCR)
+          pdf_text.py            lecture PDF -> the text of each page (QtPdf)
           descriptors.py         Pass A: decode once, cache frame descriptors
           ink_analysis.py        shape of a change: thickness, replacement
           detector.py            Pass B: pure scoring + state machine
@@ -123,6 +126,7 @@ Fully local lecture video → transcript → slide-linked notes.
           capture_panel.py       screenshots beside the video: re-mark, replay
           transcript_view.py     virtualised segment list, "Ask AI" on each line
           ask_panel.py           Ask AI chat under the video
+          corrections_panel.py   the Typos tab: fix, keep or listen to each word
           transcribe_panel.py    model options, progress, cancel
           slide_panel.py         slide navigator: thumbnails + detect controls
           workers.py             QThread wrappers around core pipelines
@@ -138,6 +142,8 @@ Fully local lecture video → transcript → slide-linked notes.
       project.json        video ref, metadata, stage states, settings
       transcript.json     segments — the authoritative transcript
       slides.json         slide identities + appearance intervals
+      corrections.json    typos an assistant suggested; the transcript is unaffected
+      reference.json      the text of the lecture's PDF, if one was attached
       audio/lecture.wav   16 kHz mono, deletable, regenerable
       slides/001.jpg      representative image per slide
       captures.json       the user's screenshots: time, marking start, marks
@@ -617,6 +623,55 @@ paths would produce answers that parse differently. The two differ only where
 they must — the hand-carried one asks for a `.md` file and allows a
 "continue" reply, the automated one asks for the answer alone and is sized to
 fit in one go.
+
+### The typo check
+
+Whisper's errors are mostly real words: "a learning program", "cloud time",
+"process date". No dictionary finds those, but the assistant is reading every
+line to translate it, so a run can report them for almost nothing extra. Each
+is one line under the Korean, `!오탈자 | wrong | right | 확실 or 의심 | why`, read
+out of the answer by `parse_translation_text` so it never reaches the stored
+translation. The English above it is still copied as it stands, because the
+copy is not what a fix is made from.
+
+**A suggestion is not an edit.** The assistant is sometimes wrong, and the
+transcript is the user's (§13), so `corrections.json` is separate and nothing
+reaches `edited_text` until the user accepts it — through
+`TranscriptStore.edit_many`, an ordinary undoable step, leaving `original_text`
+alone. All views and exports then see it the usual way (§14).
+
+**Nothing records that a fix was made.** A suggestion is open while its words
+are in its line, which is read off the text each time. Undo, *Restore
+original*, *Reset*, and typing the word by hand all do the right thing without
+touching it, and there is no second copy of "what the line says" to drift. Only
+*Keep as it is* is stored, since that leaves the words there; it survives being
+asked again. A fresh transcription clears the suggestions, whose segment ids
+would otherwise point at unrelated lines.
+
+**Answers are checked, not trusted.** `match_corrections` looks for the words
+near the timestamp they were reported under, and drops what it cannot find, so
+a suggestion cannot point at something the lecture does not say. Latin words
+match whole ("rate" is not in "generate"); Hangul does not, because particles
+join the word.
+
+**The PDF.** A slide that says "process state" settles what a transcript cannot.
+`slides/pdf_text.py` reads the text with QtPdf, which is PDFium and already in
+PySide6-Addons, so there is no new dependency; `reference.json` keeps the text
+and the file name, never the path or the file (§4). Real decks measured 200–500
+characters a page with a text layer on nearly every page, so OCR was left out;
+a PDF of pictures says so instead (§32).
+
+Most decks fit under the 8,000-character limit and go whole. Longer documents
+would cost more per batch than the batch, so `ReferenceText.pages_for` sends the
+pages sharing the most words with that batch's speech, ignoring words on half
+the pages or more (titles, footers). The text is marked in the prompt as
+material, not instructions, since it comes from a file. It is one more thing
+leaving the machine, so the dialog's notice names it whenever it would go, and
+only then.
+
+Measured on one real Codex batch over a made-up lecture with six planted
+errors: all six found, the right `date` beside a planted one left alone, spoken
+filler left alone, and every line parsed.
 
 
 ---

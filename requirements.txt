@@ -10,7 +10,8 @@
 # Essentials = QtCore/QtGui/QtWidgets. Addons is required as well because
 # QtMultimedia + QtMultimediaWidgets moved into the Addons wheel in Qt 6.9.
 # Qt's bundled FFmpeg media backend is what lets MP4/MOV/MKV play without the
-# user installing any system codec pack.
+# user installing any system codec pack. QtPdf, also in Addons, reads the text
+# of a lecture's PDF for the typo check, locally.
 PySide6-Essentials>=6.8,<6.10
 PySide6-Addons>=6.8,<6.10
 

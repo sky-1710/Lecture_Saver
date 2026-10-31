@@ -151,6 +151,15 @@ class Settings:
     def translation_engine(self, value: str) -> None:
         self.set("translation_engine", str(value))
 
+    @property
+    def translation_checks_typos(self) -> bool:
+        """Whether a translation also reports what the transcription got wrong."""
+        return bool(self._data.get("translation_checks_typos", True))
+
+    @translation_checks_typos.setter
+    def translation_checks_typos(self, value: bool) -> None:
+        self.set("translation_checks_typos", bool(value))
+
     # -- reading -----------------------------------------------------------
 
     @property

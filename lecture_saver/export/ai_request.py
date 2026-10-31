@@ -25,6 +25,7 @@ from .text_formats import to_markdown
 __all__ = [
     "AI_REQUEST_SUFFIX",
     "REQUEST_CONTINUATION_RULE",
+    "REQUEST_CORRECTIONS",
     "REQUEST_DELIVERABLES",
     "REQUEST_EXAMPLE",
     "REQUEST_INTRO",
@@ -135,6 +136,42 @@ learning rate가 너무 크면
 ```
 """
 
+#: Asks for what the transcription got wrong, one line under the Korean, in the
+#: shape :func:`lecture_saver.core.corrections.parse_fix_line` reads. The English
+#: is still copied as it stands: the answer's timestamps are what its lines are
+#: matched back by, and a fix is the user's to accept, not the assistant's to make.
+REQUEST_CORRECTIONS = """
+## 오탈자 점검
+
+이 전사는 음성 인식이 만든 것이라, 비슷하게 들리는 다른 말로 적히거나 철자가 깨진 곳이
+있습니다. (예: running → learning, clock → cloud, state → date, Block → BIOck)
+번역하면서 그런 곳을 찾아 주세요.
+
+1. 찾으면 그 줄의 한국어 직역 **바로 다음 줄에** 아래 형식으로 한 줄을 적으세요.
+   고칠 곳이 없는 줄에는 아무것도 적지 마세요.
+   `!오탈자 | 전사에 적힌 말 | 고친 말 | 확실 또는 의심 | 근거`
+2. 전사에 적힌 말은 전사에서 **글자 그대로** 복사하고, 그 줄 안에 있는 말만 적으세요.
+   고칠 단어와 뜻을 알 수 있는 앞뒤 단어 정도로 짧게 적으세요.
+3. 영어 줄은 위 규칙대로 전사 그대로 두세요. 한국어 직역은 고친 말을 기준으로 옮기세요.
+4. `확실`은 강의 자료에 고친 말이 나오거나, 문맥상 다른 뜻일 수 없을 때입니다.
+   `의심`은 고친 말이 맞아 보이지만 강의를 직접 들어야 확인할 수 있을 때입니다.
+5. 근거는 한국어로 짧게 적으세요. 강의 자료에서 찾았다면 쪽 번호(p.12)도 적으세요.
+6. 문법, 말투, 구두점, 대소문자, 말더듬은 고치지 마세요. 교수님이 실제로 그렇게 말했을
+   수 있습니다. 듣고 잘못 적은 말만 찾으세요.
+
+```
+## Slide 3
+
+[00:05:41] So a process is simply a learning program.
+그러므로 process는 단순히 실행 중인 program입니다.
+!오탈자 | learning program | running program | 확실 | 강의 자료 p.2에 running program으로 나옴
+
+[00:05:46] The kernel saves the process date at each PCB.
+kernel은 process state를 각 PCB에 저장합니다.
+!오탈자 | process date | process state | 의심 | 문맥상 state로 보이나 강의 자료에는 없음
+```
+"""
+
 REQUEST_TAIL = """
 ---
 
@@ -148,6 +185,7 @@ TRANSLATION_REQUEST = (
     + REQUEST_RULES
     + REQUEST_CONTINUATION_RULE
     + REQUEST_EXAMPLE
+    + REQUEST_CORRECTIONS
     + REQUEST_TAIL
 )
 

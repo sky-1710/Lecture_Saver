@@ -18,6 +18,11 @@ widget: a drag over them selects, across lines and their translations, and
 Ctrl+C copies. Each row's text is laid out once by :func:`text_layout` for
 painting, measuring and finding the letter under the mouse, so the three agree.
 
+Words the assistant doubts carry a wavy underline, as a spelling checker's do,
+with the suggestion in the line's tooltip and the choice in its right-click
+menu. The underline is found in the text as each row is painted, so it goes
+the moment the words do, even while they are being typed over.
+
 The view never changes the transcript itself. It reports what the user did -
 typed text, asked to merge, split, delete - as signals, and the owner applies
 those to the project's single :class:`TranscriptStore` (§14). That keeps every
@@ -76,6 +81,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.corrections import Correction
 from ..core.models import TranscriptSegment
 from ..core.timecode import format_hms
 from . import theme
@@ -103,6 +109,9 @@ ASK_LABEL = "Ask AI"
 _ACCENT = QColor(theme.ACCENT)
 _ACCENT_SOFT = QColor(theme.ACCENT_SOFT)
 _EDITED = QColor(theme.WARNING_TEXT)
+#: The wavy underline under words the assistant is sure of, and those it doubts.
+_TYPO_SURE = QColor(theme.DANGER)
+_TYPO_DOUBT = QColor(theme.WARNING_TEXT)
 _TRANSLATION = QColor(theme.TRANSLATION)
 _SURFACE = QColor(theme.SURFACE)
 #: Selected words, in the selection colours of the theme's text boxes.
@@ -149,6 +158,23 @@ def layout_height(layout: QTextLayout) -> int:
     return math.ceil(last.y() + last.height())
 
 
+def _typo_marks(
+    corrections: Sequence[Correction], text: str
+) -> list[QTextLayout.FormatRange]:
+    """A wavy underline under the words each suggestion is about."""
+    marks = []
+    for correction in corrections:
+        for start, end in correction.spans(text):
+            mark = QTextLayout.FormatRange()
+            mark.start, mark.length = start, end - start
+            look = QTextCharFormat()
+            look.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+            look.setUnderlineColor(_TYPO_SURE if correction.sure else _TYPO_DOUBT)
+            mark.format = look
+            marks.append(mark)
+    return marks
+
+
 class TranscriptModel(QAbstractListModel):
     """Adapts a sequence of segments to Qt's model interface.
 
@@ -163,6 +189,8 @@ class TranscriptModel(QAbstractListModel):
         self._current_row = -1
         #: Segment id -> imported Korean for that line. Display only.
         self._translations: dict[str, str] = {}
+        #: Segment id -> what the assistant doubts in that line. Display only.
+        self._corrections: dict[str, tuple[Correction, ...]] = {}
 
     def set_segments(self, segments: Sequence[TranscriptSegment]) -> None:
         self.beginResetModel()
@@ -177,6 +205,22 @@ class TranscriptModel(QAbstractListModel):
         self.beginResetModel()
         self._translations = dict(translations)
         self.endResetModel()
+
+    def set_corrections(self, corrections: dict[str, tuple[Correction, ...]]) -> None:
+        """Mark the words each line's suggestions are about; ``{}`` for none.
+
+        Only repaints: the marks change no row's height.
+        """
+        if corrections == self._corrections:
+            return
+        self._corrections = dict(corrections)
+        if self._segments:
+            last = self.index(len(self._segments) - 1, 0)
+            self.dataChanged.emit(self.index(0, 0), last, [Qt.ItemDataRole.ToolTipRole])
+
+    def corrections_at(self, row: int) -> tuple[Correction, ...]:
+        segment = self.segment_at_row(row)
+        return self._corrections.get(segment.id, ()) if segment is not None else ()
 
     def segment_at_row(self, row: int) -> TranscriptSegment | None:
         if 0 <= row < len(self._segments):
@@ -243,6 +287,11 @@ class TranscriptModel(QAbstractListModel):
             if segment.is_edited:
                 original = segment.original_text or "(added by hand - no original)"
                 tip += f"\nOriginal: {original}"
+            for correction in self._corrections.get(segment.id, ()):
+                doubt = "" if correction.sure else " (not sure)"
+                tip += f"\nPossibly “{correction.right}”, not “{correction.wrong}”{doubt}"
+                if correction.reason:
+                    tip += f": {correction.reason}"
             return tip + "\nClick to jump here · double-click or F2 to edit"
         return None
 
@@ -478,6 +527,8 @@ class SegmentDelegate(QStyledItemDelegate):
                 palette.color(QPalette.ColorRole.Text) if part == PART_TEXT else _TRANSLATION
             )
             chosen_words = []
+            if part == PART_TEXT and isinstance(view, TranscriptView):
+                chosen_words += _typo_marks(view.corrections_at(index.row()), words)
             span = (
                 view.selected_span(index.row(), part, len(words))
                 if isinstance(view, TranscriptView) else None
@@ -647,6 +698,10 @@ class TranscriptView(QListView):
     askRequested = Signal(str, str)
     #: Have the assistant explain a line straight away.
     explainRequested = Signal(str)
+    #: Accept a suggestion for a line (a Correction).
+    fixRequested = Signal(object)
+    #: Leave the line as it is (a Correction).
+    keepRequested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -714,6 +769,13 @@ class TranscriptView(QListView):
         self.clear_text_selection()
         self._model.set_translations(translations)
         self.scheduleDelayedItemsLayout()
+
+    def set_corrections(self, corrections: dict[str, tuple[Correction, ...]]) -> None:
+        """Segment id -> what the assistant doubts in it, marked in the line."""
+        self._model.set_corrections(corrections)
+
+    def corrections_at(self, row: int) -> tuple[Correction, ...]:
+        return self._model.corrections_at(row)
 
     def clear_segments(self) -> None:
         self.set_segments(())
@@ -1132,6 +1194,18 @@ class TranscriptView(QListView):
         self.setCurrentIndex(index)
 
         menu = QMenu(self)
+        typo_choices = []
+        for correction in self._model.corrections_at(index.row()):
+            typo_choices.append((
+                menu.addAction(f"Change “{correction.wrong}” to “{correction.right}”"),
+                self.fixRequested, correction,
+            ))
+            typo_choices.append((
+                menu.addAction(f"Keep “{correction.wrong}” as it is"),
+                self.keepRequested, correction,
+            ))
+        if typo_choices:
+            menu.addSeparator()
         copy = menu.addAction("Copy\tCtrl+C") if self.has_text_selection else None
         copy_line = menu.addAction("Copy this line")
         translation = str(index.data(ROLE_TRANSLATION) or "")
@@ -1155,6 +1229,10 @@ class TranscriptView(QListView):
         chosen = menu.exec(self.viewport().mapToGlobal(point))
         if chosen is None:
             return
+        for action, signal, correction in typo_choices:
+            if chosen is action:
+                signal.emit(correction)
+                return
         if chosen is copy:
             self.copy_text()
         elif chosen is copy_line:

@@ -16,7 +16,8 @@ plainly.
 
 What never leaves, on any path: the video, the audio, the slide images. An
 engine is given a string and returns a string; it is not handed the project,
-its files or their paths.
+its files or their paths. A PDF attached for the typo check goes the same way:
+as the words on its pages, in the prompt, never as the file.
 """
 
 from __future__ import annotations

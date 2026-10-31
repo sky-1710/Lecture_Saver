@@ -19,6 +19,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from ..core.models import VideoInfo
+from ..core.reference import ReferenceText
 from ..core.slides import SlideDetectionOptions
 from ..export.document import LectureDocument
 from ..export.exporter import run_export
@@ -257,11 +258,15 @@ class TranslationWorker(QObject):
         engine: object,
         *,
         skip: set[int] | None = None,
+        check_typos: bool = False,
+        reference: ReferenceText | None = None,
     ) -> None:
         super().__init__()
         self._document = document
         self._engine = engine
         self._skip = skip or set()
+        self._check_typos = check_typos
+        self._reference = reference
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -283,6 +288,8 @@ class TranslationWorker(QObject):
                 on_batch=self.batch_ready.emit,
                 on_progress=self.progress.emit,
                 cancel=self._cancel,
+                check_typos=self._check_typos,
+                reference=self._reference,
             )
         except Exception as exc:  # noqa: BLE001 - a worker must never crash the app
             log.exception("Translation failed")

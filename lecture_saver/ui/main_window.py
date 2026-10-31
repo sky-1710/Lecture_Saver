@@ -505,6 +505,9 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        if not resume:
+            # Suggestions name lines of the transcript being replaced.
+            self.project.clear_corrections()
 
         self.settings.set_transcription_defaults(
             {

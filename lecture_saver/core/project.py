@@ -16,7 +16,9 @@ from .alignment import Alignment, align
 from .atomic_io import read_json, write_json_atomic
 from .captures import CaptureSet
 from .chat import ChatLog
+from .corrections import CorrectionSet
 from .models import ProjectMeta, StageStatus, Transcript, VideoInfo
+from .reference import ReferenceText
 from .slides import SlideSet
 from .study import StudySet
 from .transcript_store import TranscriptStore
@@ -39,6 +41,10 @@ ORIGINAL_TRANSCRIPT_FILE = "transcript_original.json"
 SLIDES_FILE = "slides.json"
 #: Slide translations imported from an AI assistant's answer.
 TRANSLATIONS_FILE = "translations.json"
+#: Words an assistant thinks the transcription got wrong.
+CORRECTIONS_FILE = "corrections.json"
+#: The text of the lecture's PDF, as background for the typo check.
+REFERENCE_FILE = "reference.json"
 #: The preview and the review quiz an assistant wrote for the study pack.
 STUDY_FILE = "study.json"
 #: Questions asked about the lecture and the assistant's answers.
@@ -93,6 +99,10 @@ class Project:
         self.slides = slides if slides is not None else SlideSet()
         #: Imported slide translations. Empty until the user imports one.
         self.translations = TranslationSet()
+        #: Suggested fixes to the transcript. Empty until a translation reports any.
+        self.corrections = CorrectionSet()
+        #: The text of the lecture's PDF. Empty until the user attaches one.
+        self.reference = ReferenceText()
         #: Study pack material. Empty until the user makes one.
         self.study = StudySet()
         #: The conversation with the assistant. Empty until a question is asked.
@@ -117,6 +127,14 @@ class Project:
     @property
     def translations_file(self) -> Path:
         return self.root / TRANSLATIONS_FILE
+
+    @property
+    def corrections_file(self) -> Path:
+        return self.root / CORRECTIONS_FILE
+
+    @property
+    def reference_file(self) -> Path:
+        return self.root / REFERENCE_FILE
 
     @property
     def study_file(self) -> Path:
@@ -278,6 +296,8 @@ class Project:
 
         project = cls(root, meta, transcript, slides)
         project.translations = cls._load_translations(root)
+        project.corrections = cls._load_corrections(root)
+        project.reference = cls._load_reference(root)
         project.study = cls._load_study(root)
         project.chat = cls._load_chat(root)
         project.captures = cls._load_captures(root)
@@ -332,6 +352,30 @@ class Project:
             return TranslationSet()
 
     @staticmethod
+    def _load_corrections(root: Path) -> CorrectionSet:
+        """Read corrections.json. A damaged file costs the suggestions, not the project."""
+        path = root / CORRECTIONS_FILE
+        if not path.is_file():
+            return CorrectionSet()
+        try:
+            return CorrectionSet.from_dict(read_json(path))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            log.warning("Ignoring an unreadable %s", CORRECTIONS_FILE, exc_info=True)
+            return CorrectionSet()
+
+    @staticmethod
+    def _load_reference(root: Path) -> ReferenceText:
+        """Read reference.json. A damaged file costs attaching the PDF again."""
+        path = root / REFERENCE_FILE
+        if not path.is_file():
+            return ReferenceText()
+        try:
+            return ReferenceText.from_dict(read_json(path))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            log.warning("Ignoring an unreadable %s", REFERENCE_FILE, exc_info=True)
+            return ReferenceText()
+
+    @staticmethod
     def _load_slides(root: Path) -> SlideSet:
         """Read slides.json. A damaged file costs a re-detection, not the project."""
         path = root / SLIDES_FILE
@@ -375,18 +419,24 @@ class Project:
 
     def preview_translation(self, text: str) -> MatchResult:
         """What importing ``text`` would attach to which slide, without saving."""
-        return match_translations(parse_translation_text(text), self.slides.appearances)
+        return match_translations(
+            parse_translation_text(text), self.slides.appearances, self.transcript.segments
+        )
 
     def import_translation(self, text: str, *, source: str = "") -> MatchResult:
         """Attach an assistant's translation to the slides and save it.
 
         Translations for slides not in the text are kept, so an answer that
-        arrived in several parts can be imported part by part.
+        arrived in several parts can be imported part by part. Typos it
+        reports are kept as suggestions; the transcript is not touched.
         """
         result = self.preview_translation(text)
         if result.matched:
             self.translations.merge(result.matched, source=source)
             self.save_translations()
+        if result.corrections:
+            self.corrections.merge(result.corrections)
+            self.save_corrections()
         return result
 
     def clear_translations(self) -> None:
@@ -395,6 +445,36 @@ class Project:
             self.translations_file.unlink(missing_ok=True)
         except OSError as exc:
             raise ProjectError(f"Could not remove {TRANSLATIONS_FILE}:\n{exc}") from exc
+
+    def save_corrections(self) -> None:
+        try:
+            write_json_atomic(self.corrections_file, self.corrections.to_dict())
+        except OSError as exc:
+            raise ProjectError(f"Could not save {CORRECTIONS_FILE}:\n{exc}") from exc
+
+    def clear_corrections(self) -> None:
+        """Forget every suggestion: a new transcript makes them meaningless."""
+        self.corrections = CorrectionSet()
+        try:
+            self.corrections_file.unlink(missing_ok=True)
+        except OSError:
+            # What is left on disk only costs a few stale suggestions next time.
+            log.warning("Could not remove %s", CORRECTIONS_FILE, exc_info=True)
+
+    def set_reference(self, reference: ReferenceText) -> None:
+        """Keep the text of the lecture's PDF with the lecture."""
+        try:
+            write_json_atomic(self.reference_file, reference.to_dict())
+        except OSError as exc:
+            raise ProjectError(f"Could not save {REFERENCE_FILE}:\n{exc}") from exc
+        self.reference = reference
+
+    def clear_reference(self) -> None:
+        try:
+            self.reference_file.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ProjectError(f"Could not remove {REFERENCE_FILE}:\n{exc}") from exc
+        self.reference = ReferenceText()
 
     def save_study(self) -> None:
         try:

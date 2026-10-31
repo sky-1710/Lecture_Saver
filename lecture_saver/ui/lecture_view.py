@@ -22,7 +22,8 @@ other and the rules can be changed in one place:
 
 Transcript edits made here are applied to the project's single transcript store
 and announced with :attr:`LectureView.transcriptEdited`, so the window can
-re-link slides and schedule autosave (§13-§16).
+re-link slides and schedule autosave (§13-§16). Typo suggestions accepted on
+the Typos tab or from a line's menu are such edits like any other.
 """
 
 from __future__ import annotations
@@ -59,8 +60,9 @@ from ..ask.prompt import Focus
 from ..config import Settings
 from ..core.alignment import Alignment, align
 from ..core.chat import Quote
+from ..core.corrections import Correction, corrected_texts
 from ..core.models import StageStatus
-from ..core.project import Project
+from ..core.project import Project, ProjectError
 from ..core.search import SearchHit, search_lecture
 from ..core.slides import SlideAppearance, SlideSet
 from ..core.timecode import format_duration, format_hms
@@ -71,6 +73,7 @@ from ..transcription.resume import resume_point
 from ..transcription.whisper_engine import WhisperOptions
 from .ask_panel import AskPanel
 from .capture_panel import CapturePanel
+from .corrections_panel import CorrectionsPanel, TypoEntry
 from .find_bar import FindBar
 from .ink import ICON_SIZE, size_icon
 from .slide_panel import SlidePanel
@@ -86,6 +89,7 @@ __all__ = ["LectureView"]
 TAB_SLIDE = 0
 TAB_FULL = 1
 TAB_SEARCH = 2
+TAB_TYPOS = 3
 PREVIEW_HEIGHT = 150
 #: The sizes the transcript and its translation can be read at, in points.
 MIN_TEXT_POINTS = 8
@@ -387,6 +391,9 @@ class LectureView(QWidget):
         self._tabs.addTab("Current slide")
         self._tabs.addTab("Full transcript")
         self._tabs.addTab("Search")
+        self._tabs.addTab("Typos")
+        # Only while there is something on it (see _update_corrections).
+        self._tabs.setTabVisible(TAB_TYPOS, False)
         self._tabs.setDrawBase(False)
         self._tabs.setExpanding(False)
         # Two short tabs: scroll arrows would hide one of them in a narrow pane.
@@ -523,6 +530,10 @@ class LectureView(QWidget):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(200)
 
+        # What the assistant thinks the transcription got wrong.
+        self._corrections_panel = CorrectionsPanel()
+        self._corrections_panel.setVisible(False)
+
         self._empty_label = QLabel(
             "No transcript yet.\n\nChoose a model above and select "
             "“Transcribe lecture”. Everything runs on this computer."
@@ -549,6 +560,7 @@ class LectureView(QWidget):
         card_layout.addWidget(self._transcript, 1)
         card_layout.addWidget(self._translation_panel)
         card_layout.addWidget(self._search_panel, 1)
+        card_layout.addWidget(self._corrections_panel, 1)
 
         right = QWidget()
         right.setMinimumWidth(300)
@@ -620,6 +632,13 @@ class LectureView(QWidget):
         )
         self._transcript.insertRequested.connect(self._on_insert_segment)
         self._transcript.deleteRequested.connect(self._on_delete_segment)
+        self._transcript.fixRequested.connect(self.fix_typo)
+        self._transcript.keepRequested.connect(self.keep_typo)
+        self._corrections_panel.fixRequested.connect(self.fix_typo)
+        self._corrections_panel.keepRequested.connect(self.keep_typo)
+        self._corrections_panel.listenRequested.connect(self._listen_to_typo)
+        self._corrections_panel.lineRequested.connect(self._open_typo_line)
+        self._corrections_panel.fixAllSureRequested.connect(self.fix_sure_typos)
         self._find_bar.searchChanged.connect(self._refresh_matches)
         self._find_bar.nextRequested.connect(lambda: self._step_match(1))
         self._find_bar.previousRequested.connect(lambda: self._step_match(-1))
@@ -772,6 +791,10 @@ class LectureView(QWidget):
         self._transcript.clear_segments()
         self._line_translations = {}
         self._transcript.set_translations({})
+        self._transcript.set_corrections({})
+        self._corrections_panel.set_entries([])
+        self._corrections_panel.setVisible(False)
+        self._tabs.setTabVisible(TAB_TYPOS, False)
         self._slides_pane.set_slides(SlideSet(), Path())
         self._panel.set_slide_keywords_available(False)
         self._alignment = Alignment((), ())
@@ -807,6 +830,10 @@ class LectureView(QWidget):
     @property
     def showing_search(self) -> bool:
         return not self._tabs.isHidden() and self._tabs.currentIndex() == TAB_SEARCH
+
+    @property
+    def showing_typos(self) -> bool:
+        return not self._tabs.isHidden() and self._tabs.currentIndex() == TAB_TYPOS
 
     @property
     def shown_appearance(self) -> SlideAppearance | None:
@@ -868,12 +895,16 @@ class LectureView(QWidget):
         segments = self._project.transcript.segments
 
         searching = self.showing_search
+        reviewing = self.showing_typos
         self._search_panel.setVisible(searching)
-        if searching:
+        self._corrections_panel.setVisible(reviewing)
+        self._update_corrections()
+        if searching or reviewing:
             for widget in (self._transcript, self._empty_label, self._slide_header,
                            self._translation_panel, self._transcript_header):
                 widget.setVisible(False)
-            self._run_search()
+            if searching:
+                self._run_search()
             return
 
         self._transcript.set_translations(self._line_translations)
@@ -1141,6 +1172,7 @@ class LectureView(QWidget):
         store.end_typing()
         self._update_edit_actions()
         self._refresh_matches(keep_position=True)
+        self._update_corrections()
 
     def _on_split_segment(self, segment_id: str, offset: int) -> None:
         result = self._edit(
@@ -1262,6 +1294,86 @@ class LectureView(QWidget):
             structural=True,
         )
 
+    # -- suggested typo fixes ------------------------------------------------
+
+    def _open_typos(self) -> list[Correction]:
+        project = self._project
+        return project.corrections.open_for(project.transcript.segments) if project else []
+
+    def _typo_entries(self, typos: list[Correction]) -> list[TypoEntry]:
+        """Each open suggestion with its line as it reads now and its slide."""
+        assert self._project is not None
+        segments = self._project.transcript.segments
+        appearances = self._project.slides.appearances
+        rows = {segment.id: index for index, segment in enumerate(segments)}
+        entries = []
+        for correction in typos:
+            row = rows[correction.segment_id]
+            shown = self._alignment.appearance_for(row)
+            entries.append(TypoEntry(
+                correction=correction,
+                line=segments[row].effective_text,
+                slide=appearances[shown].appearance_id if shown is not None else None,
+            ))
+        return entries
+
+    def _update_corrections(self) -> None:
+        """Bring everything that shows suggestions into line with the text.
+
+        The tab shows while there is something on it, and stays while it is
+        the one open, so fixing the last word does not pull the view away.
+        """
+        typos = self._open_typos()
+        lines: dict[str, tuple[Correction, ...]] = {}
+        for correction in typos:
+            lines[correction.segment_id] = (*lines.get(correction.segment_id, ()), correction)
+        self._transcript.set_corrections(lines)
+
+        self._tabs.setTabText(TAB_TYPOS, f"Typos {len(typos)}" if typos else "Typos")
+        self._tabs.setTabVisible(TAB_TYPOS, bool(typos) or self.showing_typos)
+        self._fit_text_size(self._transcript_card.width())
+        if self.showing_typos:
+            self._corrections_panel.set_entries(self._typo_entries(typos))
+
+    def fix_typo(self, correction: Correction) -> None:
+        self._apply_typos([correction], f"Changed to “{correction.right}” - Undo takes it back")
+
+    def fix_sure_typos(self) -> None:
+        sure = [correction for correction in self._open_typos() if correction.sure]
+        self._apply_typos(sure, f"{len(sure)} typos fixed - Undo takes them all back")
+
+    def _apply_typos(self, corrections: list[Correction], message: str) -> None:
+        store = self._store()
+        if store is None or not corrections:
+            return
+        texts = corrected_texts(corrections, store.segments)
+        single = corrections[0].segment_id if len(corrections) == 1 else None
+        self._edit(lambda st: st.edit_many(texts, "Fix typos"), single, message)
+
+    def keep_typo(self, correction: Correction) -> None:
+        """Leave the words alone, and do not suggest changing them again."""
+        project = self._project
+        if project is None:
+            return
+        project.corrections.keep(correction)
+        try:
+            project.save_corrections()
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Could not save", str(exc))
+        self._update_corrections()
+
+    def _listen_to_typo(self, correction: Correction) -> None:
+        """Play the line, with the list left open beside the video."""
+        self.play_from(correction.start)
+
+    def _open_typo_line(self, correction: Correction) -> None:
+        """Show the line in the transcript, to correct it some other way."""
+        store = self._store()
+        index = store.index_of(correction.segment_id) if store is not None else None
+        if index is not None:
+            self._open_line(correction.segment_id, correction.start,
+                            self._alignment.appearance_for(index))
+
     # -- lecture search (§18) -------------------------------------------------
 
     def open_search(self, query: str | None = None) -> None:
@@ -1339,20 +1451,27 @@ class LectureView(QWidget):
         if self._project is None or not 0 <= index < len(self._search_hits):
             return
         hit = self._search_hits[index]
-        target = hit.start
-        if hit.appearance_index is not None:
-            appearance = self._project.slides.appearances[hit.appearance_index]
+        self._open_line(hit.segment_id, hit.start, hit.appearance_index)
+
+    def _open_line(
+        self, segment_id: str | None, start: float, appearance_index: int | None
+    ) -> None:
+        """Show a line in the transcript: its slide, the video there, it selected."""
+        assert self._project is not None
+        target = start
+        if appearance_index is not None:
+            appearance = self._project.slides.appearances[appearance_index]
             # A sentence begun just before its slide appeared still belongs to
             # that slide; seek inside the slide so playback does not switch away.
-            target = max(hit.start, appearance.start)
-            self._shown = hit.appearance_index
+            target = max(start, appearance.start)
+            self._shown = appearance_index
             self._tabs.setCurrentIndex(TAB_SLIDE)
         else:
             self._tabs.setCurrentIndex(TAB_FULL)
         self._show_transcript(target)
         self._on_seek_requested(target)
-        if hit.segment_id is not None:
-            row = self._transcript.row_of(hit.segment_id)
+        if segment_id is not None:
+            row = self._transcript.row_of(segment_id)
             if row >= 0:
                 self._transcript.select_row(row)
 

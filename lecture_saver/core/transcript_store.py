@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import bisect
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -234,6 +234,25 @@ class TranscriptStore:
         _set_text(segment, text)
         self._changed()
         return True
+
+    def edit_many(self, texts: Mapping[str, str], label: str) -> int:
+        """Set what several segments say, as one undoable step. Returns how many.
+
+        Ids of segments that are gone are passed over: a suggestion can outlive
+        its line.
+        """
+        changes = [
+            (segment, texts[segment.id])
+            for segment in self._transcript.segments
+            if segment.id in texts and segment.effective_text != texts[segment.id]
+        ]
+        if not changes:
+            return 0
+        self._history.record(label, self._transcript.segments)
+        for segment, text in changes:
+            _set_text(segment, text)
+        self._changed()
+        return len(changes)
 
     def end_typing(self) -> None:
         """Close a coalesced typing session; a session that changed nothing vanishes."""

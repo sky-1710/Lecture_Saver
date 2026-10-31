@@ -8,16 +8,23 @@ every time thereafter.
 Each batch is saved as it arrives, on this thread. A run that stops - the
 usage limit, a dropped connection, the Stop button - keeps everything already
 translated, and starting again picks up from the first untranslated slide.
+
+A run can also report what the transcription got wrong, judged against the
+text of the lecture's PDF when one is attached. That text is sent too, so the
+panel at the top says so whenever it would be. What comes back is suggestions:
+nothing in the transcript changes until the user accepts them.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,11 +37,13 @@ from PySide6.QtWidgets import (
 
 from ..config import Settings
 from ..core.project import Project, ProjectError
+from ..core.reference import ReferenceText
+from ..slides.pdf_text import read_pdf_pages
 from ..translate import engine_from_settings
 from ..translate.engine import TranslationEngine
 from .ai_consent import consent_text, ensure_ai_consent
 from .theme import Role, set_role
-from .workers import TranslationWorker, run_in_thread
+from .workers import JobWorker, ProgressReport, TranslationWorker, run_in_thread
 
 log = logging.getLogger(__name__)
 
@@ -52,22 +61,23 @@ class TranslateDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Translate with AI")
-        self.resize(560, 400)
+        self.resize(560, 460)
         self._project = project
         self._settings = settings
         self._engine: TranslationEngine = engine_from_settings(settings)
         self._thread: QThread | None = None
         self._worker: TranslationWorker | None = None
         self._saved = 0
+        self._fixes = 0
         self._save_errors: list[str] = []
+        #: The PDF being read, while it is.
+        self._reading: QThread | None = None
+        self._reader: JobWorker | None = None
+        self._reading_path: Path | None = None
 
         self._notice = QLabel()
         self._notice.setWordWrap(True)
         self._notice.setTextFormat(Qt.TextFormat.RichText)
-        self._notice.setText(
-            "The transcript <b>text</b> is sent to the assistant to be translated. "
-            "The video, the audio and the slide images are not sent."
-        )
         notice_frame = QFrame()
         notice_layout = QVBoxLayout(notice_frame)
         notice_layout.setContentsMargins(12, 10, 12, 10)
@@ -83,6 +93,33 @@ class TranslateDialog(QDialog):
 
         self._redo = QCheckBox("Translate slides that already have a translation again")
         self._redo.toggled.connect(self._refresh)
+
+        self._check_typos = QCheckBox("Also look for words the transcription got wrong")
+        self._check_typos.setChecked(settings.translation_checks_typos)
+        self._check_typos.setToolTip(
+            "The assistant reports what looks misheard, and the translation "
+            "follows what was meant.\nThey are suggestions on the Typos tab: the "
+            "transcript does not change until you accept one."
+        )
+        self._check_typos.toggled.connect(self._on_check_typos)
+
+        self._reference_label = QLabel()
+        self._reference_label.setWordWrap(True)
+        set_role(self._reference_label, Role.MUTED)
+        self._attach_button = QPushButton("Attach PDF...")
+        self._attach_button.setToolTip(
+            "The professor's slides or notes for this lecture. Their text is what "
+            "typos are judged against, and is kept with the lecture."
+        )
+        self._attach_button.clicked.connect(self._choose_reference)
+        self._detach_button = QPushButton("Remove")
+        self._detach_button.clicked.connect(self._remove_reference)
+        reference_row = QHBoxLayout()
+        reference_row.setContentsMargins(24, 0, 0, 0)
+        reference_row.setSpacing(8)
+        reference_row.addWidget(self._reference_label, 1)
+        reference_row.addWidget(self._attach_button)
+        reference_row.addWidget(self._detach_button)
 
         self._progress = QProgressBar()
         self._progress.setVisible(False)
@@ -110,6 +147,8 @@ class TranslateDialog(QDialog):
         layout.addWidget(self._engine_label)
         layout.addWidget(self._status)
         layout.addWidget(self._redo)
+        layout.addWidget(self._check_typos)
+        layout.addLayout(reference_row)
         layout.addStretch(1)
         layout.addWidget(self._progress)
         layout.addWidget(self._detail)
@@ -141,7 +180,47 @@ class TranslateDialog(QDialog):
         sections = translatable_sections(document, skip=skip)
         return [s.number for s in sections if s.number is not None]
 
+    @property
+    def _sends_reference(self) -> bool:
+        return self._check_typos.isChecked() and not self._project.reference.is_empty
+
+    def _update_notice(self) -> None:
+        """Say what a run would send, now, not what it usually sends."""
+        if self._sends_reference:
+            self._notice.setText(
+                "The transcript <b>text</b> and the <b>text of the attached PDF</b> "
+                "are sent to the assistant. The video, the audio and the slide "
+                "images are not sent."
+            )
+        else:
+            self._notice.setText(
+                "The transcript <b>text</b> is sent to the assistant to be "
+                "translated. The video, the audio and the slide images are not sent."
+            )
+
+    def _update_reference(self) -> None:
+        reference = self._project.reference
+        if self._reading is not None:
+            text = "Reading the PDF..."
+        elif reference.is_empty:
+            text = "No PDF attached: words are judged from the lecture alone."
+        else:
+            pages = len(reference.pages)
+            text = (
+                f"{reference.source}: {pages} page{'s' if pages != 1 else ''}, "
+                f"{reference.characters:,} characters of text."
+            )
+        self._reference_label.setText(text)
+        checking = self._check_typos.isChecked() and not self.is_running
+        idle = checking and self._reading is None
+        self._reference_label.setEnabled(self._check_typos.isChecked())
+        self._attach_button.setText("Attach PDF..." if reference.is_empty else "Change PDF...")
+        self._attach_button.setEnabled(idle)
+        self._detach_button.setEnabled(idle and not reference.is_empty)
+
     def _refresh(self) -> None:
+        self._update_notice()
+        self._update_reference()
         availability = self._engine.availability()
         self._engine_label.setText(
             f"<b>{self._engine.label}</b><br>{availability.detail}"
@@ -174,13 +253,70 @@ class TranslateDialog(QDialog):
             set_role(self._status, None)
             self._start_button.setEnabled(True)
         else:
+            again = ", which checks them for typos too" if self._check_typos.isChecked() else ""
             self._status.setText(
                 "Every slide with speech already has a translation. Tick the box "
-                "above to translate them again."
+                f"below to translate them again{again}."
                 if done else "There is no transcript to translate yet."
             )
             set_role(self._status, Role.MUTED)
             self._start_button.setEnabled(False)
+
+    # -- the lecture's PDF -------------------------------------------------------
+
+    def _on_check_typos(self, checked: bool) -> None:
+        self._settings.translation_checks_typos = checked
+        self._refresh()
+
+    def _choose_reference(self) -> None:
+        start = str(self._settings.get("last_pdf_dir", str(Path.home())))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose the lecture's PDF", start, "PDF (*.pdf)"
+        )
+        if path:
+            self._settings.set("last_pdf_dir", str(Path(path).parent))
+            self.read_reference(Path(path))
+
+    def read_reference(self, path: Path) -> None:
+        """Read the PDF in the background: a textbook takes a moment (§26)."""
+        if self._reading is not None or self.is_running:
+            return
+
+        def job(_report: ProgressReport) -> object:
+            return read_pdf_pages(path)
+
+        self._reading_path = path
+        self._reading = QThread(self)
+        self._reader = JobWorker(job)
+        self._reader.finished.connect(self._on_reference_read)
+        self._start_button.setEnabled(False)
+        self._close_button.setEnabled(False)
+        run_in_thread(self._reader, self._reading)
+        self._update_reference()
+
+    def _on_reference_read(self, result: object) -> None:
+        if self._reading is not None:
+            self._reading.quit()
+            self._reading.wait(20000)
+        name = self._reading_path.name if self._reading_path else ""
+        self._reading = self._reader = self._reading_path = None
+        self._close_button.setEnabled(True)
+        problem = str(result) if isinstance(result, Exception) else ""
+        if isinstance(result, tuple):
+            try:
+                self._project.set_reference(ReferenceText(source=name, pages=result))
+            except ProjectError as exc:
+                problem = str(exc)
+        if problem:
+            QMessageBox.warning(self, "Could not use the PDF", problem)
+        self._refresh()
+
+    def _remove_reference(self) -> None:
+        try:
+            self._project.clear_reference()
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Could not remove the PDF", str(exc))
+        self._refresh()
 
     # -- running ---------------------------------------------------------------
 
@@ -188,7 +324,7 @@ class TranslateDialog(QDialog):
         return ensure_ai_consent(self, self._settings, self._engine.label)
 
     def _start(self) -> None:
-        if self.is_running or not self._agreed():
+        if self.is_running or self._reading is not None or not self._agreed():
             return
         from ..export.document import build_document
 
@@ -198,16 +334,24 @@ class TranslateDialog(QDialog):
         document = build_document(self._project)
 
         self._saved = 0
+        self._fixes = 0
         self._save_errors = []
         self._start_button.setEnabled(False)
         self._stop_button.setEnabled(True)
         self._redo.setEnabled(False)
+        self._check_typos.setEnabled(False)
+        self._attach_button.setEnabled(False)
+        self._detach_button.setEnabled(False)
         self._close_button.setEnabled(False)
         self._progress.setVisible(True)
         self._progress.setRange(0, 0)
         self._detail.setText("Starting...")
 
-        self._worker = TranslationWorker(document, self._engine, skip=skip)
+        self._worker = TranslationWorker(
+            document, self._engine, skip=skip,
+            check_typos=self._check_typos.isChecked(),
+            reference=self._project.reference,
+        )
         self._thread = QThread(self)
         self._worker.batch_ready.connect(self._on_batch)
         self._worker.progress.connect(self._on_progress)
@@ -239,7 +383,8 @@ class TranslateDialog(QDialog):
             self._save_errors.append(str(exc))
             return
         self._saved += len(result.matched)
-        if result.matched:
+        self._fixes += len(result.corrections)
+        if result.matched or result.corrections:
             self.changed.emit()
 
     def _on_failed(self, message: str) -> None:
@@ -260,6 +405,7 @@ class TranslateDialog(QDialog):
         self._worker = None
         self._progress.setVisible(False)
         self._stop_button.setEnabled(False)
+        self._check_typos.setEnabled(True)
         self._close_button.setEnabled(True)
         self._detail.setText("")
 
@@ -274,6 +420,11 @@ class TranslateDialog(QDialog):
             lines.append(f"{self._saved} slides translated and saved.")
         elif not translated:
             lines.append("No slides were translated.")
+        if self._fixes:
+            lines.append(
+                f"{self._fixes} possible typo{'s' if self._fixes != 1 else ''} to look "
+                "through on the Typos tab. The transcript has not been changed."
+            )
         if cancelled:
             lines.append("Stopped. What was translated before stopping is saved.")
         if missing:
@@ -297,6 +448,8 @@ class TranslateDialog(QDialog):
     # -- closing ----------------------------------------------------------------
 
     def reject(self) -> None:
+        if self._reading is not None:
+            return  # a moment: the PDF is saved to this lecture when it is read
         if self.is_running:
             answer = QMessageBox.question(
                 self, "Stop the translation?",

@@ -19,9 +19,9 @@ os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
 
 pytest.importorskip("PySide6.QtWidgets")
 
-from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QGuiApplication  # noqa: E402
-from PySide6.QtWidgets import QApplication, QStyleOptionViewItem  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox, QStyleOptionViewItem  # noqa: E402
 
 from lecture_saver.config import Settings  # noqa: E402
 from lecture_saver.core.alignment import align  # noqa: E402
@@ -2464,3 +2464,187 @@ def test_closing_the_window_stops_a_question_in_flight(qapp, project, tmp_path):
     window.close()
     assert not panel.is_busy
     assert window.project.chat.is_empty
+
+
+class TestTypos:
+    """What the assistant doubts, from the first mark to the fix being undone."""
+
+    ANSWER = (
+        "## Slide 1\n\n"
+        "[00:00:00] Today we begin with the basic concepts of machine learning.\n"
+        "오늘은 machine learning의 기본 개념부터 시작합니다.\n"
+        "!오탈자 | basic concepts | basic concept | 확실 | 강의 자료 p.2\n\n"
+        "## Slide 2\n\n"
+        "[00:00:30] If the value is too large, the model diverges.\n"
+        "값이 너무 크면 model이 발산합니다.\n"
+        "!오탈자 | model diverges | modal diverges | 의심 | 들어 봐야 함\n"
+    )
+
+    @pytest.fixture
+    def typos_view(self, editing_view, project_with_slides):
+        project_with_slides.import_translation(self.ANSWER)
+        editing_view.refresh_translations()
+        QApplication.processEvents()
+        return editing_view
+
+    @staticmethod
+    def _review(view):
+        from lecture_saver.ui.lecture_view import TAB_TYPOS
+
+        view._tabs.setCurrentIndex(TAB_TYPOS)
+        QApplication.processEvents()
+        return view._corrections_panel
+
+    def test_there_is_no_tab_until_there_is_something_on_it(self, editing_view):
+        from lecture_saver.ui.lecture_view import TAB_TYPOS
+
+        assert not editing_view._tabs.isTabVisible(TAB_TYPOS)
+
+    def test_the_tab_counts_what_is_open(self, typos_view):
+        from lecture_saver.ui.lecture_view import TAB_TYPOS
+
+        assert typos_view._tabs.isTabVisible(TAB_TYPOS)
+        assert typos_view._tabs.tabText(TAB_TYPOS) == "Typos 2"
+
+    def test_the_list_shows_the_line_and_the_fix(self, typos_view):
+        panel = self._review(typos_view)
+        assert panel.isVisibleTo(typos_view)
+        assert not typos_view._transcript.isVisibleTo(typos_view)
+        text = panel._list.toPlainText()
+        assert "Slide 1" in text and "Today we begin with the basic concepts" in text
+        assert "basic concept\n" in text and "강의 자료 p.2" in text
+        assert "not sure" in text
+        assert [e.slide for e in panel.entries] == [1, 2]
+
+    def test_the_words_are_marked_in_the_line(self, typos_view):
+        from lecture_saver.ui.transcript_view import _typo_marks
+
+        transcript = typos_view._transcript
+        assert len(transcript.corrections_at(0)) == 1
+        assert not transcript.corrections_at(1)
+        marks = _typo_marks(transcript.corrections_at(0), "the basic concepts of")
+        assert [(m.start, m.length) for m in marks] == [(4, 14)]
+        tip = transcript.model().index(0, 0).data(Qt.ItemDataRole.ToolTipRole)
+        assert "Possibly “basic concept”" in tip and "강의 자료 p.2" in tip
+
+    def test_a_mark_changes_no_row_height(self, typos_view):
+        transcript = typos_view._transcript
+        before = transcript.sizeHintForIndex(transcript.model().index(0, 0))
+        transcript.set_corrections({})
+        assert transcript.sizeHintForIndex(transcript.model().index(0, 0)) == before
+
+    def test_fixing_edits_the_one_transcript_and_keeps_the_original(
+        self, typos_view, project_with_slides
+    ):
+        edited: list[bool] = []
+        typos_view.transcriptEdited.connect(edited.append)
+        panel = self._review(typos_view)
+        panel._on_link(QUrl("fix:0"))
+        segment = project_with_slides.transcript.get("segment_001")
+        assert segment.effective_text.startswith("Today we begin with the basic concept of")
+        assert "concepts" in segment.original_text
+        assert edited == [False]  # so the window autosaves it
+        assert len(panel.entries) == 1
+
+    def test_undo_brings_the_suggestion_back(self, typos_view, project_with_slides):
+        from lecture_saver.ui.lecture_view import TAB_TYPOS
+
+        panel = self._review(typos_view)
+        panel._on_link(QUrl("fix:0"))
+        assert typos_view._tabs.tabText(TAB_TYPOS) == "Typos 1"
+        typos_view.undo()
+        assert typos_view._tabs.tabText(TAB_TYPOS) == "Typos 2"
+        assert len(panel.entries) == 2
+        assert not project_with_slides.transcript.get("segment_001").is_edited
+
+    def test_keeping_leaves_the_line_and_is_remembered(self, typos_view, project_with_slides):
+        panel = self._review(typos_view)
+        before = project_with_slides.transcript.get("segment_001").effective_text
+        panel._on_link(QUrl("keep:0"))
+        assert project_with_slides.transcript.get("segment_001").effective_text == before
+        assert len(panel.entries) == 1
+        reopened = Project.open(project_with_slides.root)
+        assert len(reopened.corrections.open_for(reopened.transcript.segments)) == 1
+
+    def test_fixing_the_sure_ones_is_one_step_and_leaves_the_doubts(
+        self, typos_view, project_with_slides
+    ):
+        panel = self._review(typos_view)
+        assert panel._fix_sure_button.text() == "Fix 1 sure"
+        panel._fix_sure_button.click()
+        assert [e.correction.wrong for e in panel.entries] == ["model diverges"]
+        assert not panel._fix_sure_button.isEnabled()
+        store = project_with_slides.transcript
+        assert "basic concept of" in store.get("segment_001").effective_text
+        assert "model diverges" in store.get("segment_003").effective_text
+        assert store.undo_label == "Fix typos"
+
+    def test_listening_plays_with_the_list_left_open(self, typos_view, monkeypatch):
+        played: list[float] = []
+        monkeypatch.setattr(typos_view, "play_from", played.append)
+        panel = self._review(typos_view)
+        panel._on_link(QUrl("listen:1"))
+        assert played == [30.0]
+        assert typos_view.showing_typos
+
+    def test_the_line_opens_in_the_transcript(self, typos_view):
+        panel = self._review(typos_view)
+        panel._on_link(QUrl("line:1"))
+        assert typos_view.showing_current_slide
+        assert typos_view.shown_appearance.appearance_id == 2
+
+    def test_a_correction_typed_by_hand_ends_the_suggestion(self, typos_view):
+        from lecture_saver.ui.lecture_view import TAB_TYPOS
+
+        editor = _open_editor(typos_view, "segment_001")
+        editor.setPlainText("Today we begin with something else.")
+        typos_view._transcript.finish_editing()
+        QApplication.processEvents()
+        assert typos_view._tabs.tabText(TAB_TYPOS) == "Typos 1"
+        assert not typos_view._transcript.corrections_at(0)
+
+    def test_the_right_click_choices_reach_the_transcript(
+        self, typos_view, project_with_slides
+    ):
+        transcript = typos_view._transcript
+        transcript.fixRequested.emit(transcript.corrections_at(0)[0])
+        store = project_with_slides.transcript
+        assert "basic concept of" in store.get("segment_001").effective_text
+        transcript.keepRequested.emit(
+            transcript.corrections_at(transcript.row_of("segment_003"))[0]
+        )
+        assert not project_with_slides.corrections.open_for(store.segments)
+
+    def test_the_tab_stays_until_left_when_the_last_is_done(self, typos_view):
+        from lecture_saver.ui.lecture_view import TAB_FULL, TAB_TYPOS
+
+        panel = self._review(typos_view)
+        panel._on_link(QUrl("fix:0"))
+        panel._on_link(QUrl("fix:0"))
+        assert typos_view.showing_typos and typos_view._tabs.isTabVisible(TAB_TYPOS)
+        assert "Nothing left" in panel._summary.text()
+        typos_view._tabs.setCurrentIndex(TAB_FULL)
+        assert not typos_view._tabs.isTabVisible(TAB_TYPOS)
+        assert typos_view._transcript.isVisibleTo(typos_view)
+
+    def test_closing_the_lecture_clears_it_all(self, typos_view):
+        from lecture_saver.ui.lecture_view import TAB_TYPOS
+
+        self._review(typos_view)
+        typos_view.close_project()
+        assert not typos_view._tabs.isTabVisible(TAB_TYPOS)
+        assert not typos_view._corrections_panel.isVisibleTo(typos_view)
+
+    def test_a_transcript_kept_keeps_its_suggestions(
+        self, qapp, project_with_slides, tmp_path, monkeypatch
+    ):
+        project_with_slides.import_translation(self.ANSWER)
+        window = MainWindow(Settings(tmp_path / "settings.json"))
+        window._open_project_at(project_with_slides.root)
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+        )
+        window._start_transcription(window._lecture_view.options())
+        assert not window.project.corrections.is_empty
+        window.close()

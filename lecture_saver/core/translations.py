@@ -18,10 +18,18 @@ end up under a different slide.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from .models import SCHEMA_VERSION, utc_now_iso
+from .corrections import (
+    Correction,
+    ProposedFix,
+    is_fix_line,
+    match_corrections,
+    parse_fix_line,
+)
+from .models import SCHEMA_VERSION, TranscriptSegment, utc_now_iso
 from .slides import SlideAppearance
 
 __all__ = [
@@ -78,6 +86,8 @@ class ParsedTranslation:
     slides: dict[int, str]
     #: Slide headings that had no text under them.
     empty: tuple[int, ...] = ()
+    #: Typos the answer reported, not yet looked for in the transcript.
+    proposed: tuple[ProposedFix, ...] = ()
 
     @property
     def is_empty(self) -> bool:
@@ -90,11 +100,16 @@ def parse_translation_text(text: str) -> ParsedTranslation:
     Fenced code blocks are skipped, so the example in the request itself is
     never mistaken for an answer. When a slide appears more than once - an
     answer pasted together with its continuation - the later text wins.
+
+    Lines reporting a typo are taken out here, wherever they stand in a slide:
+    they are not translation, and belong to the transcript line above them.
     """
     slides: dict[int, str] = {}
     current: int | None = None
     lines: list[str] = []
     fenced = False
+    stamp: int | None = None
+    proposed: list[ProposedFix] = []
 
     def close() -> None:
         if current is None:
@@ -116,14 +131,26 @@ def parse_translation_text(text: str) -> ParsedTranslation:
             close()
             current = int(heading.group("hash") or heading.group("bold") or heading.group("bare"))
             lines = []
+            stamp = None
             continue
-        if current is not None:
-            lines.append(raw)
+        if current is None:
+            continue
+        timed = _TIMED.match(raw)
+        if timed:
+            stamp = _seconds(timed.group("stamp"))
+        if is_fix_line(raw):
+            fix = parse_fix_line(raw, stamp)
+            if fix is not None:
+                proposed.append(fix)
+            continue
+        lines.append(raw)
     close()
 
     empty = tuple(number for number, body in slides.items() if not body)
     return ParsedTranslation(
-        slides={n: body for n, body in slides.items() if body}, empty=empty
+        slides={n: body for n, body in slides.items() if body},
+        empty=empty,
+        proposed=tuple(proposed),
     )
 
 
@@ -291,12 +318,17 @@ class MatchResult:
     unknown: tuple[int, ...]
     #: Current slide numbers the text did not translate.
     missing: tuple[int, ...]
+    #: Typos it reported that are really in the transcript.
+    corrections: tuple[Correction, ...] = ()
 
 
 def match_translations(
-    parsed: ParsedTranslation, appearances: list[SlideAppearance]
+    parsed: ParsedTranslation,
+    appearances: list[SlideAppearance],
+    segments: Sequence[TranscriptSegment] = (),
 ) -> MatchResult:
-    """Attach parsed text to the current slides by their displayed number."""
+    """Attach parsed text to the current slides by their displayed number,
+    and the typos it reports to the lines of ``segments`` that say them."""
     by_number = {a.appearance_id: a for a in appearances}
     matched = [
         SlideTranslation(
@@ -311,4 +343,7 @@ def match_translations(
     ]
     unknown = tuple(n for n in parsed.slides if n not in by_number)
     missing = tuple(a.appearance_id for a in appearances if a.appearance_id not in parsed.slides)
-    return MatchResult(matched=matched, unknown=unknown, missing=missing)
+    return MatchResult(
+        matched=matched, unknown=unknown, missing=missing,
+        corrections=match_corrections(parsed.proposed, segments),
+    )
