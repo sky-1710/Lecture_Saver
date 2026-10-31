@@ -207,6 +207,8 @@ class LectureView(QWidget):
     #: Make the PDF to read before the lecture, or the one for after it.
     previewRequested = Signal()
     reviewRequested = Signal()
+    #: Gather what Gemini Notebook needs for a video into one folder.
+    bundleRequested = Signal()
     #: Translate the lecture here, with an AI assistant.
     translateRequested = Signal()
     #: Export the lecture with a Korean translation request on top.
@@ -295,6 +297,13 @@ class LectureView(QWidget):
         study_menu.addAction(self._preview_action)
         study_menu.addAction(self._lesson_action)
         study_menu.addAction(self._review_action)
+        study_menu.addSeparator()
+        self._bundle_action = QAction("Files for Gemini Notebook...", self)
+        self._bundle_action.setToolTip(
+            "Put the lecture's PDF, the transcript, the preview and the text to paste "
+            "in one folder, to upload yourself.\nNothing is sent."
+        )
+        study_menu.addAction(self._bundle_action)
         self._study_button = QPushButton("Study")
         self._study_button.setMenu(study_menu)
         self._study_button.setToolTip("Make a preview to read before the lecture, or a review")
@@ -646,6 +655,7 @@ class LectureView(QWidget):
         self._quick_export_button.clicked.connect(self.quickExportRequested)
         self._preview_action.triggered.connect(self.previewRequested)
         self._review_action.triggered.connect(self.reviewRequested)
+        self._bundle_action.triggered.connect(self.bundleRequested)
         self._translate_button.clicked.connect(self.translateRequested)
         self._more_formats_action.triggered.connect(self.exportRequested)
         self._ai_request_menu_action.triggered.connect(self.aiRequestRequested)

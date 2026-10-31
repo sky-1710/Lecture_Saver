@@ -194,6 +194,13 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
 
    Untick *Also send pictures of the PDF's pages* in either window to send words
    only; the choice is kept.
+   - **Files for Gemini Notebook**, for a narrated video made by Google's Gemini
+     Notebook (formerly NotebookLM). It puts the lecture's PDF, the transcript,
+     the preview and the text to paste in one folder,
+     `<lecture>_gemini_notebook`, beside your other exports, and offers to open
+     the folder, copy the text and open the site. There is no way in for an
+     application, so you upload them yourself: Lecture Saver sends nothing, and
+     what you upload goes to Google. Make the preview first to put it in.
 
    What Codex wrote is saved in the project, so making a PDF again — after
    fixing a line, or with other slide options — is instant and uses no quota;
@@ -509,8 +516,8 @@ to one language for the whole recording.
 - **Attach the lecture's PDF** in the same dialog, and words are judged against
   its text: a suggestion can then say *강의 자료 p.3에 clock time으로 나옴*. The
   PDF is read on this computer and its text is kept, in `reference.json`, with a
-  picture of each page for the review, so it is attached once per lecture. The
-  file itself stays where it is. A PDF that is only pictures, like a scan, has
+  picture of each page and a copy of the file, so it is attached once per
+  lecture and the original can move. A PDF that is only pictures, like a scan, has
   no text to read and says so. Long documents send only the pages that share
   words with each batch, up to about 8,000 characters a batch
 - Nothing changes by itself. Suggestions wait on the **Typos** tab, which appears
@@ -584,6 +591,7 @@ Lecture 01/
   corrections.json              typos the assistant suggested
   reference.json                the text of the lecture's PDF, if one is attached
   reference_pages/p001.jpg …    a picture of each of its pages, up to the first 60
+  reference_pages/lecture.pdf   a copy of it, unless it is over 200 MB
   chat.json                     the Ask AI conversation
   study.json                    the preview and the quiz, as the assistant wrote them
   captures.json                 screenshots: time, where marking began, marks

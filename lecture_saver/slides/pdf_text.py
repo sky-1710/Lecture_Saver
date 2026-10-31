@@ -9,9 +9,8 @@ is only a picture reads as empty, and a PDF that is all pictures - a scan - says
 so rather than quietly contributing nothing (§32).
 
 Pictures of the pages are drawn when the PDF is attached and kept with the
-lecture, because the PDF itself is not: it may have moved by the time the review
-is made, and only its name is remembered. A diagram has no words to read, which
-is what the pictures are for.
+lecture, as the original may have moved by the time they are wanted. A diagram
+has no words to read, which is what the pictures are for.
 
 The document object is made and dropped here, so this runs on whichever thread
 calls it.

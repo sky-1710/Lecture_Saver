@@ -1,8 +1,8 @@
 """Attach the lecture's PDF: a line saying what is attached, and its buttons.
 
 The Translate dialog and the study dialog share one PDF per lecture, so they
-share this. The PDF is read off the UI thread. Its text and pictures of its
-pages are kept with the lecture; the file itself stays where it is (§4).
+share this. The PDF is read off the UI thread. Its text, pictures of its pages
+and a copy of the file are kept with the lecture, so the original can move.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import Settings
-from ..core.project import Project, ProjectError
+from ..core.project import REFERENCE_PDF_NAME, Project, ProjectError
 from ..core.reference import ReferenceText
 from ..slides.pdf_text import read_pdf_pages, render_pdf_pages
 from .theme import Role, set_role
@@ -31,6 +31,9 @@ from .workers import JobWorker, ProgressReport, run_in_thread
 log = logging.getLogger(__name__)
 
 __all__ = ["ReferenceRow"]
+
+#: A deck is a few megabytes. Past this it is a textbook, and not worth a copy.
+MAX_KEPT_PDF_BYTES = 200 * 1024 * 1024
 
 
 class ReferenceRow(QWidget):
@@ -122,6 +125,8 @@ class ReferenceRow(QWidget):
         def job(_report: ProgressReport) -> object:
             pages = read_pdf_pages(path)
             render_pdf_pages(path, incoming)
+            if path.stat().st_size <= MAX_KEPT_PDF_BYTES:
+                shutil.copyfile(path, incoming / REFERENCE_PDF_NAME)
             return pages
 
         self._reading_path = path

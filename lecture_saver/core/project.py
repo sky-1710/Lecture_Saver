@@ -48,6 +48,8 @@ CORRECTIONS_FILE = "corrections.json"
 REFERENCE_FILE = "reference.json"
 #: Pictures of its pages, kept because the PDF itself is not.
 REFERENCE_PAGES_DIR = "reference_pages"
+#: A copy of the PDF, in that folder, to put in a folder for Gemini Notebook.
+REFERENCE_PDF_NAME = "lecture.pdf"
 #: The preview and the review's quiz an assistant wrote.
 STUDY_FILE = "study.json"
 #: Questions asked about the lecture and the assistant's answers.
@@ -147,6 +149,12 @@ class Project:
     def reference_pictures(self) -> list[Path]:
         """Pictures of the attached PDF's pages, in page order."""
         return sorted(self.reference_pages_dir.glob("p*.jpg"))
+
+    @property
+    def reference_pdf(self) -> Path | None:
+        """The kept copy of the attached PDF, if there is one."""
+        path = self.reference_pages_dir / REFERENCE_PDF_NAME
+        return path if path.is_file() else None
 
     @property
     def study_file(self) -> Path:
@@ -474,11 +482,11 @@ class Project:
             log.warning("Could not remove %s", CORRECTIONS_FILE, exc_info=True)
 
     def set_reference(self, reference: ReferenceText, pictures: Path | None = None) -> None:
-        """Keep the lecture's PDF with the lecture: its text, and its pages' pictures.
+        """Keep the lecture's PDF with the lecture: its text, pictures and a copy.
 
-        ``pictures`` is a folder made for this and is moved here. Without one
-        the pictures of whatever PDF was attached before go, as they are not of
-        this one.
+        ``pictures`` is a folder made for this, holding the pictures and the
+        copy, and is moved here. Without one what was kept of the PDF attached
+        before goes, as it is not of this one.
         """
         try:
             write_json_atomic(self.reference_file, reference.to_dict())

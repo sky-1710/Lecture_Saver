@@ -129,7 +129,8 @@ Fully local lecture video → transcript → slide-linked notes.
           transcript_view.py     virtualised segment list, "Ask AI" on each line
           ask_panel.py           Ask AI chat under the video
           corrections_panel.py   the Typos tab: fix, keep or listen to each word
-          reference_row.py       attach the lecture's PDF, for two dialogs
+          reference_row.py       attach the lecture's PDF, for three dialogs
+          bundle_dialog.py       what goes in the folder for Gemini Notebook
           lesson_panel.py        the preview lecture: pages, words, voice, controls
           narrator.py            reads paragraphs aloud with Windows' voice
           flowchart_picture.py   a concept map on screen, from the PDF's layout
@@ -150,7 +151,7 @@ Fully local lecture video → transcript → slide-linked notes.
       slides.json         slide identities + appearance intervals
       corrections.json    typos an assistant suggested; the transcript is unaffected
       reference.json      the text of the lecture's PDF, if one was attached
-      reference_pages/    a picture of each of its pages, up to 60
+      reference_pages/    a picture of each of its pages, up to 60, and a copy of it
       study.json          the preview (Markdown) and the quiz, once made
       audio/lecture.wav   16 kHz mono, deletable, regenerable
       slides/001.jpg      representative image per slide
@@ -665,8 +666,8 @@ join the word.
 **The PDF.** A slide that says "process state" settles what a transcript cannot.
 `slides/pdf_text.py` reads the text with QtPdf, which is PDFium and already in
 PySide6-Addons, so there is no new dependency; `reference.json` keeps the text
-and the file name, never the path or the file (§4), and `reference_pages/` a
-picture of each page for the review (§13). Real decks measured 200–500
+and the file name, never the path, and `reference_pages/` a picture of each page
+and a copy of the file (§13). Real decks measured 200–500
 characters a page with a text layer on nearly every page, so OCR was left out;
 a PDF of pictures says so instead (§32).
 
@@ -699,8 +700,8 @@ translate first. That one can go on anyway: a slide that will not translate must
 not lock this away. A lecture in Korean (`TRANSLATED_INTO`) has nothing to do.
 
 **Both send pictures.** A diagram has no words for the text layer to give, so
-the preview and the quiz are also shown each page of the attached PDF. The PDF
-itself is not kept (§4), so `slides/pdf_text.py` draws the pages when it is attached, 1280 px
+the preview and the quiz are also shown each page of the attached PDF. The
+original may move, so `slides/pdf_text.py` draws the pages when it is attached, 1280 px
 on the long side, into `reference_pages/`, for the first 60 pages: a textbook
 would take minutes to draw and not fit in a request. These are the one thing
 beyond words that leaves the machine, and they are pages the user chose to
@@ -738,6 +739,13 @@ so a pause or a step takes effect at once; with no Korean voice it says so. Afte
 each step the panel goes on, stopping short of a heading with 정답 in it. The tab
 shows only with a preview saved. Its controls are in Korean, unlike the rest of
 the application, because the lecture is.
+
+**A folder for Gemini Notebook.** Its narrated videos are better than any voice
+here, but it has no API for a personal account, so `export/notebook_bundle.py`
+writes what it needs into `<lecture>_gemini_notebook` and the user uploads it: the
+PDF, the edited transcript, the preview laid out again, and the words to paste,
+which name only what the folder holds. That is why a copy of the PDF is now kept,
+in `reference_pages/`, up to 200 MB. It sends nothing, so it needs no agreement.
 
 **The preview is writing, the quiz is data.** The quiz uses `ask(..., schema=)`,
 which Codex enforces with `--output-schema`. The schema follows strict mode

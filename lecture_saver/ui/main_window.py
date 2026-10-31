@@ -201,6 +201,9 @@ class MainWindow(QMainWindow):
         self._review_action = QAction("Create r&eview (복습)...", self)
         self._review_action.setEnabled(False)
         file_menu.addAction(self._review_action)
+        self._bundle_action = QAction("Files for &Gemini Notebook...", self)
+        self._bundle_action.setEnabled(False)
+        file_menu.addAction(self._bundle_action)
         self._translate_action = QAction("&Translate with AI...", self)
         self._translate_action.setEnabled(False)
         file_menu.addAction(self._translate_action)
@@ -261,6 +264,7 @@ class MainWindow(QMainWindow):
         self._quick_export_action.triggered.connect(self._quick_export)
         self._preview_action.triggered.connect(self._make_preview)
         self._review_action.triggered.connect(self._make_review)
+        self._bundle_action.triggered.connect(self._make_bundle)
         self._screenshots_export_action.triggered.connect(self._export_screenshots)
         self._translate_action.triggered.connect(self._translate_with_ai)
         self._ai_request_action.triggered.connect(self._ai_translation_request)
@@ -292,6 +296,7 @@ class MainWindow(QMainWindow):
         self._lecture_view.screenshotsExportRequested.connect(self._export_screenshots)
         self._lecture_view.previewRequested.connect(self._make_preview)
         self._lecture_view.reviewRequested.connect(self._make_review)
+        self._lecture_view.bundleRequested.connect(self._make_bundle)
         self._lecture_view.translateRequested.connect(self._translate_with_ai)
         self._lecture_view.aiRequestRequested.connect(self._ai_translation_request)
         self._lecture_view.importTranslationRequested.connect(self._import_translation)
@@ -425,6 +430,7 @@ class MainWindow(QMainWindow):
         self._screenshots_export_action.setEnabled(True)
         self._preview_action.setEnabled(True)
         self._review_action.setEnabled(True)
+        self._bundle_action.setEnabled(True)
         self._translate_action.setEnabled(True)
         self._ai_request_action.setEnabled(True)
         self._import_translation_action.setEnabled(True)
@@ -460,6 +466,7 @@ class MainWindow(QMainWindow):
         self._screenshots_export_action.setEnabled(False)
         self._preview_action.setEnabled(False)
         self._review_action.setEnabled(False)
+        self._bundle_action.setEnabled(False)
         self._translate_action.setEnabled(False)
         self._ai_request_action.setEnabled(False)
         self._import_translation_action.setEnabled(False)
@@ -1166,16 +1173,32 @@ class MainWindow(QMainWindow):
             self._translate_with_ai()
         return clicked is go_on
 
-    def _make_study_pdf(self, part: str) -> None:
-        if self.project is None or self._busy:
+    def _make_bundle(self) -> None:
+        """Everything for a Gemini Notebook video, in one folder."""
+        if not self._ready_to_study():
             return
+        snapshot = self._export_snapshot()
+        if snapshot is None or self.project is None:
+            return
+        from .bundle_dialog import BundleDialog
+
+        document, _settings, output = snapshot
+        BundleDialog(self.project, self.settings, document, output, self).exec()
+
+    def _ready_to_study(self) -> bool:
+        """Whether what study material is made from has been done first."""
+        if self.project is None or self._busy:
+            return False
         if self.project.transcript.is_empty:
             QMessageBox.information(
                 self, "No transcript yet",
                 "Transcribe the lecture first - this is written from it.",
             )
-            return
-        if not self._translation_settled():
+            return False
+        return self._translation_settled()
+
+    def _make_study_pdf(self, part: str) -> None:
+        if not self._ready_to_study() or self.project is None:
             return
         # The same snapshot an export takes: pending edits flushed, the notes
         # options last used, and the folder the notes PDF goes to.
@@ -1368,7 +1391,8 @@ class MainWindow(QMainWindow):
         has_project = enabled and self.project is not None
         for action in (
             self._export_action, self._quick_export_action, self._translate_action,
-            self._preview_action, self._review_action, self._screenshots_export_action,
+            self._preview_action, self._review_action, self._bundle_action,
+            self._screenshots_export_action,
             self._ai_request_action, self._import_translation_action,
         ):
             action.setEnabled(has_project)

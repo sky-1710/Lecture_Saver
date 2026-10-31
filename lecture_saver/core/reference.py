@@ -4,8 +4,8 @@ Whether "process date" is a mishearing is hard to tell from the transcript
 alone. A slide that says "process state" settles it. So the words of the PDF
 the professor handed out can be kept with the lecture and shown to the
 assistant as it checks the transcript, and the preview is taught from them.
-Only the text is kept: the PDF itself stays where it is (§4), and text is all
-that a prompt can carry.
+This is the text, which is what a prompt can carry. Pictures of the pages and a
+copy of the file are kept beside it, in the project's ``reference_pages``.
 
 The preview is one request and gets every page. For the typo check a deck is
 usually small enough to go along whole too, but a longer document would cost
