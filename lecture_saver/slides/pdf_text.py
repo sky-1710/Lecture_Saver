@@ -99,10 +99,25 @@ def page_picture_name(page: int) -> str:
     return f"p{page:03d}.jpg"
 
 
+def _draw_page(document: Any, page: int, pixels: Any) -> Any:
+    """A page of a loaded document as an image, on white.
+
+    A page's background is often simply unpainted, which as a JPEG is black.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage, QPainter
+
+    picture = QImage(pixels, QImage.Format.Format_RGB32)
+    picture.fill(Qt.GlobalColor.white)
+    painter = QPainter(picture)
+    painter.drawImage(0, 0, document.render(page, pixels))
+    painter.end()
+    return picture
+
+
 def render_pdf_pages(path: Path, folder: Path, *, limit: int = MAX_PAGE_PICTURES) -> int:
     """Draw the first ``limit`` pages into ``folder``. Returns how many were drawn."""
-    from PySide6.QtCore import QSize, Qt
-    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtCore import QSize
 
     document = _open(path)
     folder.mkdir(parents=True, exist_ok=True)
@@ -111,14 +126,8 @@ def render_pdf_pages(path: Path, folder: Path, *, limit: int = MAX_PAGE_PICTURES
         size = document.pagePointSize(page)
         scale = _PICTURE_SIZE / max(size.width(), size.height(), 1.0)
         pixels = QSize(round(size.width() * scale), round(size.height() * scale))
-        # A page's background is often simply unpainted, which as a JPEG is black.
-        picture = QImage(pixels, QImage.Format.Format_RGB32)
-        picture.fill(Qt.GlobalColor.white)
-        painter = QPainter(picture)
-        painter.drawImage(0, 0, document.render(page, pixels))
-        painter.end()
-        name = page_picture_name(page + 1)
-        if not picture.save(str(folder / name), quality=_PICTURE_QUALITY):
+        picture = _draw_page(document, page, pixels)
+        if not picture.save(str(folder / page_picture_name(page + 1)), quality=_PICTURE_QUALITY):
             document.close()
             raise PdfReadError(f"A picture of page {page + 1} could not be saved.")
     document.close()

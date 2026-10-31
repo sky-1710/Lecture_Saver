@@ -76,6 +76,7 @@ from .capture_panel import CapturePanel
 from .corrections_panel import CorrectionsPanel, TypoEntry
 from .find_bar import FindBar
 from .ink import ICON_SIZE, size_icon
+from .lesson_panel import LessonPanel
 from .slide_panel import SlidePanel
 from .theme import Role, set_flag, set_role
 from .transcribe_panel import TranscribePanel
@@ -90,6 +91,7 @@ TAB_SLIDE = 0
 TAB_FULL = 1
 TAB_SEARCH = 2
 TAB_TYPOS = 3
+TAB_LESSON = 4
 PREVIEW_HEIGHT = 150
 #: The sizes the transcript and its translation can be read at, in points.
 MIN_TEXT_POINTS = 8
@@ -272,9 +274,15 @@ class LectureView(QWidget):
         self._preview_action = QAction("Preview (예습)...", self)
         self._preview_action.setToolTip(
             "A PDF to read before the lecture: the assistant teaches it from the "
-            "lecture's PDF and transcript.\nOnly their text is sent; the video, "
-            "audio and slide images are never sent."
+            "lecture's PDF and transcript.\nPictures of the PDF's pages go too; the "
+            "video, the audio and the pictures taken from the video are never sent."
         )
+        self._lesson_action = QAction("Preview lecture (예습 강의)", self)
+        self._lesson_action.setToolTip(
+            "Go through the saved preview step by step, beside the lecture's PDF, "
+            "read aloud.\nNothing is sent, and it uses none of your usage."
+        )
+        self._lesson_action.setEnabled(False)
         self._review_action = QAction("Review (복습)...", self)
         self._review_action.setToolTip(
             "A PDF for after the lecture: the slide notes and a 15-question quiz "
@@ -285,6 +293,7 @@ class LectureView(QWidget):
         study_menu = QMenu(self)
         study_menu.setToolTipsVisible(True)
         study_menu.addAction(self._preview_action)
+        study_menu.addAction(self._lesson_action)
         study_menu.addAction(self._review_action)
         self._study_button = QPushButton("Study")
         self._study_button.setMenu(study_menu)
@@ -406,8 +415,10 @@ class LectureView(QWidget):
         self._tabs.addTab("Full transcript")
         self._tabs.addTab("Search")
         self._tabs.addTab("Typos")
+        self._tabs.addTab("예습 강의")
         # Only while there is something on it (see _update_corrections).
         self._tabs.setTabVisible(TAB_TYPOS, False)
+        self._tabs.setTabVisible(TAB_LESSON, False)
         self._tabs.setDrawBase(False)
         self._tabs.setExpanding(False)
         # Two short tabs: scroll arrows would hide one of them in a narrow pane.
@@ -548,6 +559,10 @@ class LectureView(QWidget):
         self._corrections_panel = CorrectionsPanel()
         self._corrections_panel.setVisible(False)
 
+        # The saved preview, taught a step at a time.
+        self._lesson_panel = LessonPanel()
+        self._lesson_panel.setVisible(False)
+
         self._empty_label = QLabel(
             "No transcript yet.\n\nChoose a model above and select "
             "“Transcribe lecture”. Everything runs on this computer."
@@ -575,6 +590,7 @@ class LectureView(QWidget):
         card_layout.addWidget(self._translation_panel)
         card_layout.addWidget(self._search_panel, 1)
         card_layout.addWidget(self._corrections_panel, 1)
+        card_layout.addWidget(self._lesson_panel, 1)
 
         right = QWidget()
         right.setMinimumWidth(300)
@@ -654,6 +670,10 @@ class LectureView(QWidget):
         self._corrections_panel.listenRequested.connect(self._listen_to_typo)
         self._corrections_panel.lineRequested.connect(self._open_typo_line)
         self._corrections_panel.fixAllSureRequested.connect(self.fix_sure_typos)
+        self._lesson_panel.seekRequested.connect(self.go_to_time)
+        self._lesson_panel.askRequested.connect(self._ask_about_lesson)
+        self._lesson_panel.readingStarted.connect(self._player.pause)
+        self._lesson_action.triggered.connect(self.open_lesson)
         self._find_bar.searchChanged.connect(self._refresh_matches)
         self._find_bar.nextRequested.connect(lambda: self._step_match(1))
         self._find_bar.previousRequested.connect(lambda: self._step_match(-1))
@@ -777,6 +797,7 @@ class LectureView(QWidget):
 
         self.refresh_transcript()
         self.refresh_slides()
+        self.refresh_lesson()
         self._ask_panel.bind(project)
         self._capture_panel.bind(project)
 
@@ -810,6 +831,10 @@ class LectureView(QWidget):
         self._corrections_panel.set_entries([])
         self._corrections_panel.setVisible(False)
         self._tabs.setTabVisible(TAB_TYPOS, False)
+        self._lesson_panel.clear()
+        self._lesson_panel.setVisible(False)
+        self._tabs.setTabVisible(TAB_LESSON, False)
+        self._lesson_action.setEnabled(False)
         self._slides_pane.set_slides(SlideSet(), Path())
         self._panel.set_slide_keywords_available(False)
         self._alignment = Alignment((), ())
@@ -849,6 +874,10 @@ class LectureView(QWidget):
     @property
     def showing_typos(self) -> bool:
         return not self._tabs.isHidden() and self._tabs.currentIndex() == TAB_TYPOS
+
+    @property
+    def showing_lesson(self) -> bool:
+        return not self._tabs.isHidden() and self._tabs.currentIndex() == TAB_LESSON
 
     @property
     def shown_appearance(self) -> SlideAppearance | None:
@@ -911,10 +940,12 @@ class LectureView(QWidget):
 
         searching = self.showing_search
         reviewing = self.showing_typos
+        learning = self.showing_lesson
         self._search_panel.setVisible(searching)
         self._corrections_panel.setVisible(reviewing)
+        self._lesson_panel.setVisible(learning)
         self._update_corrections()
-        if searching or reviewing:
+        if searching or reviewing or learning:
             for widget in (self._transcript, self._empty_label, self._slide_header,
                            self._translation_panel, self._transcript_header):
                 widget.setVisible(False)
@@ -1350,6 +1381,23 @@ class LectureView(QWidget):
         if self.showing_typos:
             self._corrections_panel.set_entries(self._typo_entries(typos))
 
+    def refresh_lesson(self) -> None:
+        """Bring the Lesson tab into line with the saved preview, if there is one."""
+        guide = self._project.study.guide if self._project is not None else None
+        self._lesson_action.setEnabled(guide is not None)
+        self._tabs.setTabVisible(TAB_LESSON, guide is not None)
+        self._fit_text_size(self._transcript_card.width())
+        if guide is not None and self._project is not None:
+            self._lesson_panel.set_lesson(guide.markdown, self._project.reference_pictures)
+
+    def open_lesson(self) -> None:
+        if self._project is not None and self._project.study.guide is not None:
+            self._tabs.setCurrentIndex(TAB_LESSON)
+
+    def _ask_about_lesson(self, words: str, seconds: float) -> None:
+        self.show_ask_panel()
+        self._ask_panel.add_quote(Quote(segment_id="lesson", start=seconds, text=words))
+
     def fix_typo(self, correction: Correction) -> None:
         self._apply_typos([correction], f"Changed to “{correction.right}” - Undo takes it back")
 
@@ -1582,6 +1630,7 @@ class LectureView(QWidget):
         the size the transcript is read at."""
         self._settings = settings
         self._ask_panel.set_settings(settings)
+        self._lesson_panel.set_settings(settings)
         stored = settings.transcript_text_size
         if stored is not None:
             self.set_text_size(stored)
@@ -1605,6 +1654,7 @@ class LectureView(QWidget):
         font = QFont(self._translation_text.font())
         font.setPointSizeF(points)
         self._translation_text.setFont(font)
+        self._lesson_panel.set_text_size(points)
         if self._text_size_box.value() != round(points):
             self._text_size_box.blockSignals(True)
             self._text_size_box.setValue(round(points))
@@ -1614,6 +1664,7 @@ class LectureView(QWidget):
 
     def shutdown(self) -> None:
         """Stop work this view runs in the background, before the window closes."""
+        self._lesson_panel.stop()
         self._ask_panel.shutdown()
         self._capture_panel.flush()
         self._player.shutdown()

@@ -103,10 +103,11 @@ Fully local lecture video → transcript → slide-linked notes.
           diagnostics.py         per-candidate gate results
           diagnose.py            --diagnose CLI, replayed from the cache
           pipeline.py            Pass C: capture images, persist, resumable
-        study/                   the preview and the review's quiz (sends text too)
+        study/                   the preview, its lecture and the review's quiz
           preview_prompt.md      the preview's instructions, word for word
           prompts.py             the two requests; the quiz's JSON schema
           generator.py           ask, validate, shuffle answers, hand back
+          lesson.py              the preview cut into steps, and what a voice says
         ask/                     Ask AI: questions about the lecture (sends text too)
           __init__.py            a question as a turn of the lecture's session
           prompt.py              which transcript goes, once per session; follow-ups
@@ -129,6 +130,9 @@ Fully local lecture video → transcript → slide-linked notes.
           ask_panel.py           Ask AI chat under the video
           corrections_panel.py   the Typos tab: fix, keep or listen to each word
           reference_row.py       attach the lecture's PDF, for two dialogs
+          lesson_panel.py        the preview lecture: pages, words, voice, controls
+          narrator.py            reads paragraphs aloud with Windows' voice
+          flowchart_picture.py   a concept map on screen, from the PDF's layout
           transcribe_panel.py    model options, progress, cancel
           slide_panel.py         slide navigator: thumbnails + detect controls
           workers.py             QThread wrappers around core pipelines
@@ -694,9 +698,9 @@ stops a lecture with no transcript, and tells one with slides untranslated to
 translate first. That one can go on anyway: a slide that will not translate must
 not lock this away. A lecture in Korean (`TRANSLATED_INTO`) has nothing to do.
 
-**The review sends pictures.** A diagram has no words for the text layer to give,
-so the quiz is also shown each page of the attached PDF. The PDF itself is not
-kept (§4), so `slides/pdf_text.py` draws the pages when it is attached, 1280 px
+**Both send pictures.** A diagram has no words for the text layer to give, so
+the preview and the quiz are also shown each page of the attached PDF. The PDF
+itself is not kept (§4), so `slides/pdf_text.py` draws the pages when it is attached, 1280 px
 on the long side, into `reference_pages/`, for the first 60 pages: a textbook
 would take minutes to draw and not fit in a request. These are the one thing
 beyond words that leaves the machine, and they are pages the user chose to
@@ -722,6 +726,19 @@ The instructions number PART 1 to 5 and then a final summary, and say "PART 1 to
 numbers and the speech with `[00:12:34]` times, so a claim can name its source.
 Without a PDF the assistant is told so, and not to write as if it had seen one.
 
+**The preview as a lecture.** The saved preview is already a teacher's lesson,
+so the lecture asks for nothing: `study/lesson.py` cuts its Markdown at `##` and
+`###` into steps, takes the pages a step cites as the pages to show (the format
+section tells the assistant to cite one under each `###`), and rewrites the text
+for the ear: no marks, no times, `p.3` as 3쪽, a chart pointed at rather than
+read. A Korean voice reads English badly and a gloss says the term twice, so
+"복권 스케줄링(Lottery Scheduling)" is read without its brackets. `ui/narrator.py`
+says a paragraph at a time through QtTextToSpeech, Windows' own offline voices,
+so a pause or a step takes effect at once; with no Korean voice it says so. After
+each step the panel goes on, stopping short of a heading with 정답 in it. The tab
+shows only with a preview saved. Its controls are in Korean, unlike the rest of
+the application, because the lecture is.
+
 **The preview is writing, the quiz is data.** The quiz uses `ask(..., schema=)`,
 which Codex enforces with `--output-schema`. The schema follows strict mode
 (every property required, no extras); counts are enforced in `core/study.py`,
@@ -743,7 +760,8 @@ routed through it as boxes of no size, then barycentre sweeps for order and
 position. It is deterministic, so a PDF made again keeps its pictures. What
 cannot be read, or would be too small to read even turned on its side, prints as
 its source: nothing the assistant wrote is lost. Characters Malgun Gothic lacks
-(`✓`, `≈`, subscripts) come from a symbol font, `pdf.printable()`.
+(`✓`, `≈`, subscripts) come from a symbol font, `pdf.printable()`. The lecture
+draws the same layout with QPainter in `ui/flowchart_picture.py`.
 
 **The application shuffles the answers.** Models place correct answers
 unevenly; `balance_answers` reorders each question's options with a seed

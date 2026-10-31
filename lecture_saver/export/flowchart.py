@@ -11,7 +11,8 @@ directed graph: each box a layer below whatever points at it, edges that skip
 a layer routed through it, and the boxes of a layer ordered to keep lines from
 crossing. Pure: it is told how big each label is and knows nothing of PDFs.
 :class:`FlowchartImage` draws the result; a picture too large for the page is
-scaled down, and one that would be unreadable is turned on its side.
+scaled down, and one that would be unreadable is turned on its side. The lecture
+draws the same layout on screen, in :mod:`lecture_saver.ui.flowchart_picture`.
 """
 
 from __future__ import annotations
@@ -23,7 +24,21 @@ from itertools import product
 
 from .pdf import FONT_REGULAR, printable
 
-__all__ = ["Edge", "Flowchart", "FlowchartImage", "Layout", "layout_chart", "parse_flowchart"]
+__all__ = [
+    "Edge",
+    "Flowchart",
+    "FlowchartImage",
+    "LABEL_WIDTH",
+    "Layout",
+    "PAD_X",
+    "PAD_Y",
+    "Route",
+    "TEXT_WIDTH",
+    "best_fit",
+    "is_readable",
+    "layout_chart",
+    "parse_flowchart",
+]
 
 _HEADER = re.compile(r"^(?:flowchart|graph)(?:\s+(TD|TB|BT|LR|RL))?\s*;?$", re.IGNORECASE)
 #: Lines that change how a chart looks, not what it says.
@@ -154,9 +169,11 @@ def parse_flowchart(source: str) -> Flowchart | None:
 # -- placing the boxes -------------------------------------------------------------------
 
 #: Width of a box's words before they wrap, in points.
-_TEXT_WIDTH = 116.0
-_PAD_X = 8.0
-_PAD_Y = 6.0
+TEXT_WIDTH = 116.0
+PAD_X = 8.0
+PAD_Y = 6.0
+#: Width of the words on a line before they wrap.
+LABEL_WIDTH = 84.0
 _FONT_SIZE = 9.0
 _LEADING = 12.5
 _LABEL_SIZE = 8.0
@@ -361,9 +378,9 @@ def _measure(label: str) -> tuple[float, float]:
     natural = max(
         (stringWidth(line, FONT_REGULAR, _FONT_SIZE) for line in label.splitlines()), default=0.0
     )
-    text_width = min(natural + 2, _TEXT_WIDTH)
+    text_width = min(natural + 2, TEXT_WIDTH)
     _, height = Paragraph(_markup(label), _box_style()).wrap(text_width, 10000)
-    return text_width + 2 * _PAD_X, height + 2 * _PAD_Y
+    return text_width + 2 * PAD_X, height + 2 * PAD_Y
 
 
 def _box_style() -> object:
@@ -388,14 +405,23 @@ def _label_style() -> object:
     )
 
 
-def _best_fit(chart: Flowchart, width: float, height: float) -> tuple[Layout, float, Flowchart]:
-    """The layout and scale to draw: as written, unless that is unreadable."""
-    fit = layout_chart(chart, _measure)
+def is_readable(scale: float) -> bool:
+    return scale >= _SMALLEST_SCALE
+
+
+def best_fit(
+    chart: Flowchart,
+    width: float,
+    height: float,
+    measure: Callable[[str], tuple[float, float]] = _measure,
+) -> tuple[Layout, float, Flowchart]:
+    """The layout, scale and chart to draw: as written, unless that is unreadable."""
+    fit = layout_chart(chart, measure)
     scale = min(1.0, width / fit.width, height / fit.height)
-    if scale >= _SMALLEST_SCALE:
+    if is_readable(scale):
         return fit, scale, chart
     turned = replace(chart, across=not chart.across)
-    other = layout_chart(turned, _measure)
+    other = layout_chart(turned, measure)
     other_scale = min(1.0, width / other.width, height / other.height)
     if other_scale > scale:
         return other, other_scale, turned
@@ -415,8 +441,8 @@ def _make_flowable() -> type:
         def __init__(self, chart: Flowchart, width: float, height: float) -> None:
             super().__init__()
             self.hAlign = "CENTER"
-            self._layout, self._scale, self._chart = _best_fit(chart, width, height)
-            self.readable = self._scale >= _SMALLEST_SCALE
+            self._layout, self._scale, self._chart = best_fit(chart, width, height)
+            self.readable = is_readable(self._scale)
 
         def wrap(self, _available_width: float, _available_height: float) -> tuple[float, float]:
             return self._layout.width * self._scale, self._layout.height * self._scale
@@ -434,10 +460,10 @@ def _make_flowable() -> type:
                 canvas.setLineWidth(0.8)
                 canvas.roundRect(left, top - box.height, box.width, box.height, 5, fill=1)
                 words = Paragraph(_markup(self._chart.nodes[node]), _box_style())
-                text_width = box.width - 2 * _PAD_X
+                text_width = box.width - 2 * PAD_X
                 _, text_height = words.wrap(text_width, 10000)
                 words.drawOn(
-                    canvas, left + _PAD_X, top - box.height + (box.height - text_height) / 2
+                    canvas, left + PAD_X, top - box.height + (box.height - text_height) / 2
                 )
             for route in layout.routes:
                 if route.label:
@@ -477,7 +503,7 @@ def _make_flowable() -> type:
             (x1, y1), (x2, y2) = route.points[middle], route.points[middle + 1]
             x, y = (x1 + x2) / 2, height - (y1 + y2) / 2
             words = Paragraph(_markup(route.label), _label_style())
-            width, text_height = words.wrap(84, 1000)
+            width, text_height = words.wrap(LABEL_WIDTH, 1000)
             canvas.setFillColor(colors.white)
             canvas.rect(
                 x - width / 2 - 1, y - text_height / 2 - 1, width + 2, text_height + 2,

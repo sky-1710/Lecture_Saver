@@ -123,8 +123,10 @@ def make_guide(
     engine: TranslationEngine,
     cancel: threading.Event,
     reference: ReferenceText | None = None,
+    pictures: Sequence[Path] = (),
 ) -> StudyGuide:
-    return StudyGuide.from_answer(engine.ask(preview_prompt(document, reference), cancel=cancel))
+    prompt = preview_prompt(document, reference, len(pictures))
+    return StudyGuide.from_answer(engine.ask(prompt, cancel=cancel, images=pictures))
 
 
 def make_quiz(
@@ -169,8 +171,8 @@ def run_study(
 ) -> StudyReport:
     """Make ``part``, handing it back as soon as it is checked.
 
-    ``reference`` is the text of the lecture's PDF, which both are written from.
-    ``pictures`` are of its pages, and go with the quiz.
+    ``reference`` is the text of the lecture's PDF, which both are written from,
+    and ``pictures`` are of its pages.
     """
     stop = cancel or threading.Event()
     report = StudyReport()
@@ -180,7 +182,7 @@ def run_study(
     value: object
     try:
         if part == PART_GUIDE:
-            value = make_guide(document, engine, stop, reference)
+            value = make_guide(document, engine, stop, reference, pictures)
         else:
             value = make_quiz(document, engine, stop, reference, pictures)
     except TranslationCancelled:

@@ -162,12 +162,21 @@ class Settings:
 
     @property
     def study_sends_page_pictures(self) -> bool:
-        """Whether the review's quiz is given pictures of the PDF's pages too."""
+        """Whether the preview and the quiz are given pictures of the PDF's pages."""
         return bool(self._data.get("study_sends_page_pictures", True))
 
     @study_sends_page_pictures.setter
     def study_sends_page_pictures(self, value: bool) -> None:
         self.set("study_sends_page_pictures", bool(value))
+
+    @property
+    def lesson_speed(self) -> str:
+        """The name of the speed the lesson is read at."""
+        return str(self._data.get("lesson_speed", "보통"))
+
+    @lesson_speed.setter
+    def lesson_speed(self, value: str) -> None:
+        self.set("lesson_speed", value)
 
     # -- reading -----------------------------------------------------------
 

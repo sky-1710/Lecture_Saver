@@ -26,7 +26,7 @@ def consent_text(engine_label: str) -> str:
         f"<b>transcript text</b> is sent to {engine_label}. "
         "That text leaves this computer. If you attach the lecture's PDF, the "
         "text of its pages goes too, and pictures of its pages go with the "
-        "review's quiz unless you turn that off.<br><br>"
+        "preview and the review's quiz unless you turn that off.<br><br>"
         "<b>What is never sent:</b> the video, the audio, and the slide images "
         "taken from the video.<br><br>"
         "You can turn this off again at any time, and the rest of the application "

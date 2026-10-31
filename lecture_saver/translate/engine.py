@@ -18,8 +18,8 @@ What never leaves, on any path: the video, the audio, the pictures taken from
 the video. An engine is given a string and returns a string; it is not handed
 the project or its paths. A lecture's attached PDF goes as the words on its
 pages, in the prompt, never as the file. The one thing that is not a string is
-for the review's quiz: pictures of those same pages, which a diagram needs,
-sent only when the window says so and with the box for them ticked.
+for the preview and the quiz: pictures of those same pages, which a diagram
+needs, sent only when the window says so and with the box for them ticked.
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ assistant — to translate it into Korean, to write a preview and a review quiz
 from it, or to answer your questions about it — because no local model on a
 laptop without a GPU does any of these well in reasonable time. If you attach
 the lecture's PDF, the text of its pages goes too, and pictures of its pages go
-with the review's quiz unless you untick that. The video, the audio and the
+with the preview and the review's quiz unless you untick that. The video, the audio and the
 slide images taken from the video are never sent. The application asks, in as
 many words, before the first
 lecture is ever sent, and you can leave it switched off and translate by hand
@@ -172,17 +172,28 @@ The log file lives at `%APPDATA%\LectureSaver\lecture_saver.log`
      concept map, the background the professor skips, each idea with why it is
      needed, and one worked example, then a summary and check questions whose
      answers start on a page of their own. Each point says whether it came from
-     the slides, the professor or the AI. Attach the PDF in the window; without
-     one it is taught from the transcript alone. Its instructions are
+     the slides, the professor or the AI. Attach the PDF in the window, and
+     pictures of its pages go with the words so that it can see the diagrams;
+     without one it is taught from the transcript alone. Its instructions are
      `lecture_saver/study/preview_prompt.md`, which you can edit.
+   - **Preview lecture (예습 강의)**, the *예습 강의* tab once a preview is saved.
+     The same lesson, a step at a time, beside the pages of the lecture's PDF
+     each step is about, and read aloud in Korean by the voice Windows already
+     has. It goes on by itself and stops before the answers. Going through it
+     sends nothing and uses no quota; *이 부분 질문* puts the step above the
+     Ask AI box, and only a question sends anything. The voice is a Windows
+     voice: clear, but flat, so the English a term is glossed with is left on the
+     screen and not read.
    - **Review (복습)**, `<lecture>_review.pdf`, for after it: the **강의 노트**
      (each slide with what was said), then a **15-question quiz in English**,
      with the answers and Korean explanations starting on the next page so they
      are not in sight while you answer. Codex writes the quiz from the
      transcript, the attached PDF's text and pictures of its pages, so it can
-     ask about diagrams; untick *Also send pictures of the PDF's pages* to send
-     words only. The application shuffles the answers across A–D, because
-     models tend to put the right answer in the same place.
+     ask about diagrams. The application shuffles the answers across A–D,
+     because models tend to put the right answer in the same place.
+
+   Untick *Also send pictures of the PDF's pages* in either window to send words
+   only; the choice is kept.
 
    What Codex wrote is saved in the project, so making a PDF again — after
    fixing a line, or with other slide options — is instant and uses no quota;
@@ -572,7 +583,7 @@ Lecture 01/
   translations.json             imported slide translations
   corrections.json              typos the assistant suggested
   reference.json                the text of the lecture's PDF, if one is attached
-  reference_pages/p001.jpg …    a picture of each of its pages, for the first 60
+  reference_pages/p001.jpg …    a picture of each of its pages, up to the first 60
   chat.json                     the Ask AI conversation
   study.json                    the preview and the quiz, as the assistant wrote them
   captures.json                 screenshots: time, where marking began, marks
@@ -789,7 +800,7 @@ switching it on changes this, and only this:
 | Slide numbers and their labels | **yes** |
 | Your questions, and the earlier turns of that lecture's chat (*Ask AI*) | **yes** |
 | The text of a PDF you attached, for the typo check, the preview and the review | **yes** |
-| Pictures of that PDF's pages, for the review's quiz, unless you untick it | **yes** |
+| Pictures of that PDF's pages, for the preview and the quiz, unless you untick it | **yes** |
 | The PDF file and its name | no |
 | Video file | no |
 | Audio | no |
@@ -820,12 +831,12 @@ turns. Within one conversation each piece of transcript goes once.
 
 The preview and the quiz are one request each, of the whole lecture — a lesson
 and a quiz both need to see all of it — and each is sent only when you make it.
-Both take the text of every page of the PDF you attached, and the quiz also takes
-pictures of the first 60 pages, each named only by its page and copied to a
-scratch folder first, so no path goes with it. The review's window says so when
-they would go. The notes in the review are built on your computer from your
-project, exactly like the notes PDF, and the concept maps are drawn on your
-computer too.
+Both take the text of every page of the PDF you attached, and pictures of the
+first 60 pages, each named only by its page and copied to a scratch folder first,
+so no path goes with it. Each window says so when they would go. The notes in the
+review are built on your computer from your project, exactly like the notes PDF,
+and the concept maps are drawn on your computer too. The preview lecture sends
+nothing at all: it is the saved preview, and the voice is Windows' own, offline.
 
 To translate without sending anything, use *AI translation request* instead:
 it writes the lecture and the request to a file for you to carry to an

@@ -1191,6 +1191,7 @@ class MainWindow(QMainWindow):
         dialog.changed.connect(
             lambda: self.statusBar().showMessage("Study material saved", 6000)
         )
+        dialog.changed.connect(self._lecture_view.refresh_lesson)
         dialog.exec()
 
     def _translate_with_ai(self) -> None:

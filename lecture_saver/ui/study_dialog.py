@@ -3,9 +3,9 @@
 They are read days apart, so each is made when it is wanted. The preview is a
 lesson the assistant teaches from the lecture's PDF and transcript. The review
 is the notes Lecture Saver already makes, and a quiz the assistant writes from
-the transcript, the PDF's text and pictures of its pages. Those pictures are
-the one thing beyond words that leaves the computer, so the panel at the top
-says so whenever they would go, and a box here keeps them home.
+the same. Pictures of the PDF's pages go with both. They are the one thing
+beyond words that leaves the computer, so the panel at the top says so whenever
+they would go, and a box here keeps them home.
 
 The assistant is asked only for what the project does not have yet. Once the
 preview or the quiz is saved, pressing the button again rebuilds the PDF from
@@ -130,7 +130,7 @@ class StudyDialog(QDialog):
         self._send_pictures = QCheckBox("Also send pictures of the PDF's pages")
         self._send_pictures.setChecked(settings.study_sends_page_pictures)
         self._send_pictures.setToolTip(
-            "So that the quiz can use diagrams, which have no text to read.\n"
+            "So that the assistant can see diagrams, which have no text to read.\n"
             "This uses more of your usage than the text does."
         )
         self._send_pictures.toggled.connect(self._on_send_pictures)
@@ -220,7 +220,7 @@ class StudyDialog(QDialog):
     @property
     def _pictures(self) -> tuple[Path, ...]:
         """The pictures a run would send."""
-        if self._preview or not self._send_pictures.isChecked():
+        if not self._send_pictures.isChecked():
             return ()
         return tuple(self._project.reference_pictures)
 
@@ -260,9 +260,7 @@ class StudyDialog(QDialog):
     def _refresh(self) -> None:
         self._update_notice()
         self._reference.set_usable(not self.is_running)
-        self._send_pictures.setVisible(
-            not self._preview and bool(self._project.reference_pictures) and self.will_ask
-        )
+        self._send_pictures.setVisible(bool(self._project.reference_pictures) and self.will_ask)
         self._close_button.setEnabled(not self.is_running and not self._reference.is_reading)
         name = "예습 (preview)" if self._preview else "복습 퀴즈 (quiz)"
         self._saved_label.setText(
